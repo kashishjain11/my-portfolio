@@ -206,12 +206,51 @@ function getSectorQuery(name, ticker) {
   if (n.match(/biotech|genomic|clinical|oncol/)) return SECTOR_MACRO_QUERIES.biotech;
   if (n.match(/energy|oil|gas|petroleum|solar|wind/)) return SECTOR_MACRO_QUERIES.energy;
   if (n.match(/tech|software|semiconductor|ai|data|cloud/)) return SECTOR_MACRO_QUERIES.tech;
-  if (n.match(/bank|financial|insurance|capital|invest/)) return SECTOR_MACRO_QUERIES.finance;
+  if (n.match(/bank|financial|insurance|capital|invest|hdfc|icici|kotak/)) return SECTOR_MACRO_QUERIES.finance;
   if (n.match(/material|mining|steel|chemical|commodity/)) return SECTOR_MACRO_QUERIES.materials;
   return SECTOR_MACRO_QUERIES.default;
 }
 
 async function fetchNews(ticker, exchange, name) {
+  const cleanTicker = ticker.replace(".TO","").replace(".NS","").replace(".BO","");
+  const cleanName = (name||"").replace(/['"]/g,"").trim();
+  
+  // Build progressive queries — start broad if name is long
+  const shortName = cleanName.split(" ").slice(0,3).join(" ");
+  const companyQ = encodeURIComponent(`${shortName} ${cleanTicker} stock`);
+  const macroQ = encodeURIComponent(getSectorQuery(name||"", ticker));
+
+  try {
+    const [companyRes, macroRes] = await Promise.all([
+      fetch(`${GNEWS_BASE}/search?q=${companyQ}&lang=en&max=6&sortby=publishedAt&token=${GNEWS_API_KEY}`),
+      fetch(`${GNEWS_BASE}/search?q=${macroQ}&lang=en&max=4&sortby=publishedAt&token=${GNEWS_API_KEY}`),
+    ]);
+
+    const [companyData, macroData] = await Promise.all([
+      companyRes.json(),
+      macroRes.json(),
+    ]);
+
+    let companyArticles = (companyData.articles||[]).map(a=>({...a,category:"company"}));
+    
+    // Fallback: if no company news, try just the ticker
+    if (companyArticles.length === 0) {
+      const fallbackRes = await fetch(`${GNEWS_BASE}/search?q=${encodeURIComponent(cleanTicker+" stock shares")}&lang=en&max=6&sortby=publishedAt&token=${GNEWS_API_KEY}`);
+      const fallbackData = await fallbackRes.json();
+      companyArticles = (fallbackData.articles||[]).map(a=>({...a,category:"company"}));
+    }
+
+    const macroArticles = (macroData.articles||[]).map(a=>({...a,category:"macro"}));
+    const seen = new Set();
+    return [...companyArticles,...macroArticles].filter(a=>{
+      if(seen.has(a.title))return false;
+      seen.add(a.title); return true;
+    });
+  } catch(e) { 
+    console.error("News fetch error:", e);
+    return []; 
+  }
+}
   const companyQuery = encodeURIComponent(`"${name||ticker}" OR "${ticker}" stock`);
   const macroQuery = encodeURIComponent(getSectorQuery(name||"", ticker));
   try {
