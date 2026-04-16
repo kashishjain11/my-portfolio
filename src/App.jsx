@@ -11,7 +11,7 @@ const FINNHUB_BASE = "https://finnhub.io/api/v1";
 
 const GlobalStyle = () => (
   <style>{`
-    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Outfit:wght@400;500;600;700;800&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --bg-0:#0a0b0e; --bg-1:#111318; --bg-2:#181b22; --bg-3:#1f232e; --bg-4:#252a37;
@@ -24,7 +24,7 @@ const GlobalStyle = () => (
       --purple:#a78bfa; --purple-dim:rgba(167,139,250,0.12);
       --teal:#22d3ee; --teal-dim:rgba(34,211,238,0.12);
       --radius:12px; --radius-sm:8px;
-      --mono:'DM Mono',monospace; --sans:'Syne',sans-serif;
+      --mono:'DM Mono',monospace; --sans:'Outfit',sans-serif;
     }
     body { background:var(--bg-0); color:var(--text-0); font-family:var(--sans); -webkit-font-smoothing:antialiased; }
     ::-webkit-scrollbar { width:4px; height:4px; }
@@ -38,7 +38,7 @@ const GlobalStyle = () => (
     .sidebar-logo p { font-size:10px; font-family:var(--mono); color:var(--text-2); margin-top:2px; text-transform:uppercase; letter-spacing:1px; }
     .sidebar-section { padding:0 12px; margin-bottom:4px; }
     .sidebar-section-label { font-size:9px; font-family:var(--mono); color:var(--text-2); text-transform:uppercase; letter-spacing:1.5px; padding:8px 8px 4px; }
-    .sidebar-owner-label { font-size:10px; font-family:var(--mono); color:var(--text-2); padding:10px 8px 4px; text-transform:uppercase; letter-spacing:1px; border-top:1px solid var(--border); margin-top:4px; }
+    .sidebar-owner-label { font-size:13px; font-weight:800; color:#f0f2f7; padding:10px 8px 4px; text-transform:uppercase; letter-spacing:0.5px; border-top:2px solid rgba(255,255,255,0.15); margin-top:6px; margin-bottom:4px; }
     .sidebar-item { display:flex; align-items:center; gap:9px; padding:8px 8px; border-radius:var(--radius-sm); font-size:12.5px; font-weight:500; color:var(--text-1); cursor:pointer; transition:all 0.15s; border:1px solid transparent; }
     .sidebar-item:hover { background:var(--bg-3); color:var(--text-0); }
     .sidebar-item.active { background:var(--accent-dim); color:var(--accent); border-color:rgba(79,156,249,0.2); }
@@ -73,7 +73,7 @@ const GlobalStyle = () => (
     .stat-card.amber::before { background:var(--amber); }
     .stat-card.purple::before { background:var(--purple); }
     .stat-card.teal::before { background:var(--teal); }
-    .stat-label { font-size:10px; font-family:var(--mono); color:var(--text-2); text-transform:uppercase; letter-spacing:1.2px; margin-bottom:7px; }
+    .stat-label { font-size:14px; font-weight:700; color:#c8cfe0; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:7px; }
     .stat-value { font-size:20px; font-weight:800; letter-spacing:-0.5px; }
     .stat-sub { font-size:11px; color:var(--text-1); margin-top:4px; font-family:var(--mono); }
     .section { margin-bottom:28px; }
@@ -83,7 +83,7 @@ const GlobalStyle = () => (
     .table-wrap { overflow-x:auto; border-radius:var(--radius); border:1px solid var(--border); }
     table { width:100%; border-collapse:collapse; font-size:12.5px; }
     thead { background:var(--bg-3); }
-    th { padding:10px 14px; text-align:left; font-size:10px; font-family:var(--mono); color:var(--text-2); text-transform:uppercase; letter-spacing:1px; font-weight:500; white-space:nowrap; border-bottom:1px solid var(--border); }
+    th { padding:10px 14px; text-align:left; font-size:14px; font-family:var(--sans); color:#c8cfe0; text-transform:uppercase; letter-spacing:0.5px; font-weight:700; white-space:nowrap; border-bottom:1px solid var(--border); }
     td { padding:11px 14px; border-bottom:1px solid var(--border); color:var(--text-0); vertical-align:middle; white-space:nowrap; }
     tbody tr { background:var(--bg-2); transition:background 0.1s; }
     tbody tr:hover { background:var(--bg-3); }
