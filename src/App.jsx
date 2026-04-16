@@ -8,6 +8,8 @@ import {
 
 const FINNHUB_API_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
+const GNEWS_API_KEY = "12be21470662cfb31adbac431359c317";
+const GNEWS_BASE = "https://gnews.io/api/v4";
 
 const GlobalStyle = () => (
   <style>{`
@@ -188,13 +190,43 @@ async function fetchUpcomingDividends(ticker, exchange) {
   } catch { return []; }
 }
 
-async function fetchNews(ticker, exchange) {
-  const symbol = resolveTicker(ticker, exchange);
-  const from = new Date(Date.now()-7*86400000).toISOString().split("T")[0];
+const SECTOR_MACRO_QUERIES = {
+  pharma: "pharmaceutical FDA drug approval biotech pipeline",
+  biotech: "biotech FDA clinical trial drug approval oncology",
+  energy: "oil price OPEC Middle East energy geopolitics war",
+  tech: "technology semiconductor AI trade tariffs US China",
+  finance: "interest rates Federal Reserve banking inflation",
+  materials: "commodity prices supply chain tariffs mining",
+  default: "stock market economy inflation tariffs geopolitics trade war",
+};
+
+function getSectorQuery(name, ticker) {
+  const n = (name + ticker).toLowerCase();
+  if (n.match(/pharma|drug|bio|therapeutics|medicine|health|clinical/)) return SECTOR_MACRO_QUERIES.pharma;
+  if (n.match(/biotech|genomic|clinical|oncol/)) return SECTOR_MACRO_QUERIES.biotech;
+  if (n.match(/energy|oil|gas|petroleum|solar|wind/)) return SECTOR_MACRO_QUERIES.energy;
+  if (n.match(/tech|software|semiconductor|ai|data|cloud/)) return SECTOR_MACRO_QUERIES.tech;
+  if (n.match(/bank|financial|insurance|capital|invest/)) return SECTOR_MACRO_QUERIES.finance;
+  if (n.match(/material|mining|steel|chemical|commodity/)) return SECTOR_MACRO_QUERIES.materials;
+  return SECTOR_MACRO_QUERIES.default;
+}
+
+async function fetchNews(ticker, exchange, name) {
+  const companyQuery = encodeURIComponent(`"${name||ticker}" OR "${ticker}" stock`);
+  const macroQuery = encodeURIComponent(getSectorQuery(name||"", ticker));
   try {
-    const r = await fetch(`${FINNHUB_BASE}/company-news?symbol=${symbol}&from=${from}&to=${today()}&token=${FINNHUB_API_KEY}`);
-    const d = await r.json();
-    return Array.isArray(d)?d.slice(0,6):[];
+    const [companyRes, macroRes] = await Promise.all([
+      fetch(`${GNEWS_BASE}/search?q=${companyQuery}&lang=en&max=5&sortby=publishedAt&token=${GNEWS_API_KEY}`),
+      fetch(`${GNEWS_BASE}/search?q=${macroQuery}&lang=en&max=4&sortby=publishedAt&token=${GNEWS_API_KEY}`),
+    ]);
+    const [companyData, macroData] = await Promise.all([companyRes.json(), macroRes.json()]);
+    const companyArticles = (companyData.articles||[]).map(a=>({...a,category:"company"}));
+    const macroArticles = (macroData.articles||[]).map(a=>({...a,category:"macro"}));
+    const seen = new Set();
+    return [...companyArticles,...macroArticles].filter(a=>{
+      if(seen.has(a.title))return false;
+      seen.add(a.title); return true;
+    });
   } catch { return []; }
 }
 
@@ -245,7 +277,7 @@ function PieChart({ segments, size=150 }) {
       <circle cx={cx} cy={cy} r={r+10} fill="var(--bg-3)"/>
       {paths}
       <circle cx={cx} cy={cy} r={r*0.55} fill="var(--bg-2)"/>
-      <text x={cx} y={cy-4} textAnchor="middle" fill="var(--text-0)" fontSize="12" fontWeight="700" fontFamily="Syne">100%</text>
+      <text x={cx} y={cy-4} textAnchor="middle" fill="var(--text-0)" fontSize="12" fontWeight="700" fontFamily="Outfit">100%</text>
       <text x={cx} y={cy+12} textAnchor="middle" fill="var(--text-2)" fontSize="9" fontFamily="DM Mono">ALLOCATED</text>
     </svg>
   );
@@ -298,16 +330,32 @@ function Modal({ title, onClose, children, footer }) {
 }
 
 function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
-  const isEdit=!!existing;
-  const [form,setForm]=useState({ accountId:existing?.accountId||defaultAccountId||"rrsp_k", ticker:existing?.ticker||"", name:existing?.name||"", exchange:existing?.exchange||"TSX", date:today(), shares:"", costPrice:"", dividends:"" });
+  const isEdit = !!existing;
+  const [form,setForm]=useState({
+    accountId:existing?.accountId||defaultAccountId||"rrsp_k",
+    ticker:existing?.ticker||"",
+    name:existing?.name||"",
+    exchange:existing?.exchange||"TSX",
+  });
+  const [tranches,setTranches]=useState(
+    existing?.tranches?.map(t=>({...t}))||[{id:"new_0",date:today(),shares:"",costPrice:"",dividends:""}]
+  );
   const [saving,setSaving]=useState(false);
   const update=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const updateT=(id,k,v)=>setTranches(ts=>ts.map(t=>t.id===id?{...t,[k]:v}:t));
+  const addNewTranche=()=>setTranches(ts=>[...ts,{id:"new_"+Date.now(),date:today(),shares:"",costPrice:"",dividends:""}]);
+  const removeTranche=(id)=>setTranches(ts=>ts.filter(t=>t.id!==id));
   const save=async()=>{
-    if(!form.ticker||(!isEdit&&(!form.shares||!form.costPrice)))return;
+    if(!form.ticker)return;
+    const validTranches=tranches.filter(t=>parseFloat(t.shares)>0&&parseFloat(t.costPrice)>0);
+    if(validTranches.length===0)return;
     setSaving(true);
-    await onSave({ accountId:form.accountId, ticker:form.ticker.toUpperCase(), name:form.name||form.ticker.toUpperCase(), exchange:form.exchange,
-      tranche:isEdit?null:{date:form.date,shares:parseFloat(form.shares),costPrice:parseFloat(form.costPrice),dividends:parseFloat(form.dividends||0)},
-      isEdit, existingId:existing?.id });
+    await onSave({
+      accountId:form.accountId, ticker:form.ticker.toUpperCase(),
+      name:form.name||form.ticker.toUpperCase(), exchange:form.exchange,
+      isEdit, existingId:existing?.id,
+      tranches:validTranches.map(t=>({id:t.id,date:t.date,shares:parseFloat(t.shares),costPrice:parseFloat(t.costPrice),dividends:parseFloat(t.dividends||0)})),
+    });
     setSaving(false); onClose();
   };
   return (
@@ -325,59 +373,28 @@ function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
             {EXCHANGES.map(x=><option key={x}>{x}</option>)}
           </select>
         </div>
-        <div className="form-group full"><label>Security Name</label><input placeholder="e.g. Amazon CAD Hedged ETF" value={form.name} onChange={e=>update("name",e.target.value)}/></div>
-        {!isEdit&&<>
-          <div className="form-group"><label>Purchase Date</label><input type="date" value={form.date} onChange={e=>update("date",e.target.value)}/></div>
-          <div className="form-group"><label>Shares</label><input type="number" placeholder="0.00" value={form.shares} onChange={e=>update("shares",e.target.value)}/></div>
-          <div className="form-group"><label>Cost Price / Share ($)</label><input type="number" placeholder="0.00" value={form.costPrice} onChange={e=>update("costPrice",e.target.value)}/></div>
-          <div className="form-group"><label>Dividends Received ($)</label><input type="number" placeholder="0.00" value={form.dividends} onChange={e=>update("dividends",e.target.value)}/></div>
-        </>}
-      </div>
-    </Modal>
-  );
-}
-
-function EditTrancheModal({ holding, onClose, onSaveTranche, onDeleteTranche, onAddTranche }) {
-  const [tranches,setTranches]=useState(holding.tranches.map(t=>({...t})));
-  const [saving,setSaving]=useState(false);
-  const [newT,setNewT]=useState({date:today(),shares:"",costPrice:"",dividends:""});
-  const updateT=(id,k,v)=>setTranches(ts=>ts.map(t=>t.id===id?{...t,[k]:v}:t));
-  const save=async()=>{ setSaving(true); await Promise.all(tranches.map(t=>onSaveTranche(t.id,{date:t.date,shares:parseFloat(t.shares),costPrice:parseFloat(t.costPrice),dividends:parseFloat(t.dividends||0)}))); setSaving(false); onClose(); };
-  const addNew=async()=>{ if(!newT.shares||!newT.costPrice)return; setSaving(true); await onAddTranche({date:newT.date,shares:parseFloat(newT.shares),costPrice:parseFloat(newT.costPrice),dividends:parseFloat(newT.dividends||0)}); setSaving(false); onClose(); };
-  return (
-    <Modal title={`Edit Tranches — ${holding.ticker}`} onClose={onClose}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={saving}>{saving?"Saving…":"Save All"}</button></>}>
-      <div style={{marginBottom:16}}>
-        <div style={{fontSize:13,fontWeight:700,marginBottom:10,color:"var(--text-1)"}}>Existing Tranches</div>
-        {tranches.map((t,i)=>(
-          <div key={t.id} className="tranche-row">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <span style={{fontSize:12,color:"var(--text-2)",fontFamily:"var(--mono)"}}>Tranche #{i+1}</span>
-              <button className="btn btn-danger btn-sm" onClick={()=>onDeleteTranche(t.id).then(onClose)}>Delete</button>
-            </div>
-            <div className="form-grid">
-              <div className="form-group"><label>Date</label><input type="date" value={t.date} onChange={e=>updateT(t.id,"date",e.target.value)}/></div>
-              <div className="form-group"><label>Shares</label><input type="number" value={t.shares} onChange={e=>updateT(t.id,"shares",e.target.value)}/></div>
-              <div className="form-group"><label>Cost Price ($)</label><input type="number" value={t.costPrice} onChange={e=>updateT(t.id,"costPrice",e.target.value)}/></div>
-              <div className="form-group"><label>Dividends ($)</label><input type="number" value={t.dividends||0} onChange={e=>updateT(t.id,"dividends",e.target.value)}/></div>
-            </div>
-          </div>
-        ))}
+        <div className="form-group full"><label>Security Name</label><input placeholder="e.g. Vanguard S&P 500 ETF" value={form.name} onChange={e=>update("name",e.target.value)}/></div>
       </div>
       <div className="divider"/>
-      <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Add New Tranche</div>
-      <div className="form-grid">
-        <div className="form-group"><label>Date</label><input type="date" value={newT.date} onChange={e=>setNewT(n=>({...n,date:e.target.value}))}/></div>
-        <div className="form-group"><label>Shares</label><input type="number" placeholder="0.00" value={newT.shares} onChange={e=>setNewT(n=>({...n,shares:e.target.value}))}/></div>
-        <div className="form-group"><label>Cost Price ($)</label><input type="number" placeholder="0.00" value={newT.costPrice} onChange={e=>setNewT(n=>({...n,costPrice:e.target.value}))}/></div>
-        <div className="form-group"><label>Dividends ($)</label><input type="number" placeholder="0.00" value={newT.dividends} onChange={e=>setNewT(n=>({...n,dividends:e.target.value}))}/></div>
-      </div>
-      <button className="btn btn-ghost btn-sm" style={{marginTop:10}} onClick={addNew} disabled={saving}>+ Add Tranche</button>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>{isEdit?"Edit Purchases":"Purchase Details"}</div>
+      {tranches.map((t,i)=>(
+        <div key={t.id} className="tranche-row">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:12,color:"var(--text-2)",fontFamily:"var(--mono)"}}>Purchase #{i+1}</span>
+            {tranches.length>1&&<button className="btn btn-danger btn-sm" onClick={()=>removeTranche(t.id)}>Remove</button>}
+          </div>
+          <div className="form-grid">
+            <div className="form-group"><label>Date</label><input type="date" value={t.date} onChange={e=>updateT(t.id,"date",e.target.value)}/></div>
+            <div className="form-group"><label>Shares</label><input type="number" placeholder="0.00" value={t.shares} onChange={e=>updateT(t.id,"shares",e.target.value)}/></div>
+            <div className="form-group"><label>Cost Price / Share ($)</label><input type="number" placeholder="0.00" value={t.costPrice} onChange={e=>updateT(t.id,"costPrice",e.target.value)}/></div>
+            <div className="form-group"><label>Dividends ($)</label><input type="number" placeholder="0.00" value={t.dividends} onChange={e=>updateT(t.id,"dividends",e.target.value)}/></div>
+          </div>
+        </div>
+      ))}
+      <button className="btn btn-ghost btn-sm" style={{marginTop:8}} onClick={addNewTranche}>+ Add Another Purchase</button>
     </Modal>
   );
-}
-
-function SellModal({ holding, prices, onClose, onSell }) {
+}function SellModal({ holding, prices, onClose, onSell }) {
   const c=calcHolding(holding,prices,{});
   const [sellPrice,setSellPrice]=useState(c.currentPrice||"");
   const [sellDate,setSellDate]=useState(today());
@@ -456,32 +473,47 @@ function DividendInfoModal({ holding, divInfo, onClose }) {
 function NewsPanel({ holding, onClose }) {
   const [news,setNews]=useState([]);
   const [loading,setLoading]=useState(true);
-  useEffect(()=>{ fetchNews(holding.ticker,holding.exchange).then(d=>{setNews(d);setLoading(false);}); },[]);
+  const [filter,setFilter]=useState("all");
+  useEffect(()=>{ fetchNews(holding.ticker,holding.exchange,holding.name).then(d=>{setNews(d);setLoading(false);}); },[]);
+  const filtered=filter==="all"?news:news.filter(n=>n.category===filter);
   return (
-    <Modal title={`News — ${holding.ticker}`} onClose={onClose}>
+    <Modal title={`News — ${holding.name||holding.ticker}`} onClose={onClose}>
+      {!loading&&news.length>0&&(
+        <div className="tab-bar" style={{marginBottom:16}}>
+          <div className={`tab ${filter==="all"?"active":""}`} onClick={()=>setFilter("all")}>All ({news.length})</div>
+          <div className={`tab ${filter==="company"?"active":""}`} onClick={()=>setFilter("company")}>Company ({news.filter(n=>n.category==="company").length})</div>
+          <div className={`tab ${filter==="macro"?"active":""}`} onClick={()=>setFilter("macro")}>Market & Macro ({news.filter(n=>n.category==="macro").length})</div>
+        </div>
+      )}
       {loading?<div className="empty"><div className="spinner"/></div>
-        :news.length===0?<div className="empty"><div className="icon">📭</div><p>No recent news found</p></div>
-        :news.map((n,i)=>(
-          <div key={i} style={{padding:"12px 0",borderBottom:i<news.length-1?"1px solid var(--border)":"none"}}>
-            <a href={n.url} target="_blank" rel="noreferrer" style={{color:"var(--text-0)",textDecoration:"none",fontSize:13,fontWeight:600,display:"block",marginBottom:4}}>{n.headline}</a>
-            <div style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>{n.source} · {new Date(n.datetime*1000).toLocaleDateString()}</div>
-            {n.summary&&<div style={{fontSize:12,color:"var(--text-1)",marginTop:6,lineHeight:1.5}}>{n.summary.slice(0,200)}{n.summary.length>200?"…":""}</div>}
+        :filtered.length===0?<div className="empty"><div className="icon">📭</div><p>No news found</p></div>
+        :filtered.map((n,i)=>(
+          <div key={i} style={{padding:"12px 0",borderBottom:i<filtered.length-1?"1px solid var(--border)":"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+              <span className="badge" style={{background:n.category==="company"?"var(--accent-dim)":"var(--amber-dim)",color:n.category==="company"?"var(--accent)":"var(--amber)",fontSize:9}}>
+                {n.category==="company"?"COMPANY":"MACRO"}
+              </span>
+              <span style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)"}}>{n.source?.name} · {new Date(n.publishedAt).toLocaleDateString()}</span>
+            </div>
+            <a href={n.url} target="_blank" rel="noreferrer" style={{color:"var(--text-0)",textDecoration:"none",fontSize:13,fontWeight:600,display:"block",marginBottom:5,lineHeight:1.4}}>{n.title}</a>
+            {n.description&&<div style={{fontSize:12,color:"var(--text-1)",lineHeight:1.5}}>{n.description.slice(0,220)}{n.description.length>220?"…":""}</div>}
           </div>
         ))}
     </Modal>
   );
-}function HoldingsTable({ holdings, prices, divInfo, onEdit, onEditTranches, onSell, onNews, onDividendInfo }) {
+}
+
+function HoldingsTable({ holdings, prices, divInfo, onEdit, onSell, onNews, onDividendInfo }) {
   const totalMarket=holdings.reduce((s,h)=>{const c=calcHolding(h,prices,divInfo);return s+(c.marketValue||c.totalCost);},0);
   return (
     <div className="table-wrap">
       <table>
         <thead><tr>
-          <th>Ticker</th><th>Security</th><th>Exch</th><th>Shares</th>
+          <th></th><th>Ticker</th><th>Security</th><th>Exch</th><th>Shares</th>
           <th className="text-right">Avg Cost</th><th className="text-right">Total Cost</th>
           <th className="text-right">Price</th><th className="text-right">Mkt Value</th>
           <th className="text-right">Gain $</th><th className="text-right">Gain %</th>
           <th className="text-right">Weight</th><th className="text-right">Div/Yr</th><th className="text-right">Yld</th>
-          <th></th>
         </tr></thead>
         <tbody>
           {holdings.length===0
@@ -493,6 +525,14 @@ function NewsPanel({ holding, onClose }) {
               const at=ACCOUNT_TYPES.find(a=>a.id===h.accountId);
               return (
                 <tr key={h.id}>
+                  <td>
+                    <div style={{display:"flex",gap:3}}>
+                      <button className="btn btn-ghost btn-icon btn-sm" title="Edit security" onClick={()=>onEdit(h)}>✏️</button>
+                      <button className="btn btn-ghost btn-icon btn-sm" title="News" onClick={()=>onNews(h)}>📰</button>
+                      <button className="btn btn-ghost btn-icon btn-sm" title="Dividends" onClick={()=>onDividendInfo(h)}>💰</button>
+                      <button className="btn btn-danger btn-icon btn-sm" title="Sell position" onClick={()=>onSell(h)}>💸</button>
+                    </div>
+                  </td>
                   <td><span className="ticker" style={{borderLeft:`3px solid ${at?.color||"var(--accent)"}`,paddingLeft:6}}>{h.ticker}</span></td>
                   <td style={{maxWidth:160,overflow:"hidden",textOverflow:"ellipsis"}}>{h.name}</td>
                   <td><span className="badge badge-blue">{h.exchange}</span></td>
@@ -506,15 +546,6 @@ function NewsPanel({ holding, onClose }) {
                   <td><div style={{display:"flex",alignItems:"center",gap:6}}><div className="progress-bar" style={{width:50}}><div className="progress-fill" style={{width:`${Math.min(weight,100)}%`,background:at?.color||"var(--accent)"}}/></div><span className="mono" style={{fontSize:10,color:"var(--text-1)"}}>{fmt(weight,1)}%</span></div></td>
                   <td className="mono text-right" style={{color:"var(--purple)"}}>{c.estimatedAnnualDiv!=null?fmtDollar(c.estimatedAnnualDiv):"—"}</td>
                   <td className="mono text-right" style={{color:"var(--purple)"}}>{c.dividendYield!=null?fmtPct(c.dividendYield):"—"}</td>
-                  <td>
-                    <div style={{display:"flex",gap:3}}>
-                      <button className="btn btn-ghost btn-icon btn-sm" title="Edit security" onClick={()=>onEdit(h)}>✏️</button>
-                      <button className="btn btn-ghost btn-icon btn-sm" title="Edit tranches" onClick={()=>onEditTranches(h)}>📋</button>
-                      <button className="btn btn-ghost btn-icon btn-sm" title="News" onClick={()=>onNews(h)}>📰</button>
-                      <button className="btn btn-ghost btn-icon btn-sm" title="Dividends" onClick={()=>onDividendInfo(h)}>💰</button>
-                      <button className="btn btn-danger btn-icon btn-sm" title="Sell position" onClick={()=>onSell(h)}>💸</button>
-                    </div>
-                  </td>
                 </tr>
               );
             })}
@@ -530,32 +561,27 @@ function SoldPositionsTable({ positions, onDelete }) {
   return (
     <div className="section">
       <div className="section-header">
-        <div>
-          <div className="section-title">Closed Positions</div>
-          <div className="section-sub">Booked P&L: <span className={totalGL>=0?"pos":"neg"}>{fmtDollar(totalGL,true)}</span></div>
-        </div>
+        <div><div className="section-title">Closed Positions</div><div className="section-sub">Booked P&L: <span className={totalGL>=0?"pos":"neg"}>{fmtDollar(totalGL,true)}</span></div></div>
       </div>
       <div className="table-wrap"><table>
         <thead><tr><th>Ticker</th><th>Account</th><th>Shares</th><th className="text-right">Avg Cost</th><th className="text-right">Sell Price</th><th className="text-right">Proceeds</th><th className="text-right">Gain $</th><th className="text-right">Gain %</th><th>Sell Date</th><th></th></tr></thead>
-        <tbody>
-          {positions.map(p=>{
-            const at=ACCOUNT_TYPES.find(a=>a.id===p.accountId);
-            return (
-              <tr key={p.id}>
-                <td><span className="ticker">{p.ticker}</span></td>
-                <td><span className="badge" style={{background:at?.color+"22",color:at?.color}}>{at?.label||p.accountId}</span></td>
-                <td className="mono">{fmt(p.shares,0)}</td>
-                <td className="mono text-right">{fmtDollar(p.avgCost)}</td>
-                <td className="mono text-right">{fmtDollar(p.sellPrice)}</td>
-                <td className="mono text-right">{fmtDollar(p.proceeds)}</td>
-                <td className={`mono text-right ${p.gainLoss>=0?"pos":"neg"}`}>{fmtDollar(p.gainLoss,true)}</td>
-                <td className={`mono text-right ${p.gainLossPct>=0?"pos":"neg"}`}>{fmtPct(p.gainLossPct,true)}</td>
-                <td className="mono">{p.sellDate}</td>
-                <td><button className="btn btn-ghost btn-icon btn-sm" onClick={()=>onDelete(p.id)}>×</button></td>
-              </tr>
-            );
-          })}
-        </tbody>
+        <tbody>{positions.map(p=>{
+          const at=ACCOUNT_TYPES.find(a=>a.id===p.accountId);
+          return (
+            <tr key={p.id}>
+              <td><span className="ticker">{p.ticker}</span></td>
+              <td><span className="badge" style={{background:at?.color+"22",color:at?.color}}>{at?.label||p.accountId}</span></td>
+              <td className="mono">{fmt(p.shares,0)}</td>
+              <td className="mono text-right">{fmtDollar(p.avgCost)}</td>
+              <td className="mono text-right">{fmtDollar(p.sellPrice)}</td>
+              <td className="mono text-right">{fmtDollar(p.proceeds)}</td>
+              <td className={`mono text-right ${p.gainLoss>=0?"pos":"neg"}`}>{fmtDollar(p.gainLoss,true)}</td>
+              <td className={`mono text-right ${p.gainLossPct>=0?"pos":"neg"}`}>{fmtPct(p.gainLossPct,true)}</td>
+              <td className="mono">{p.sellDate}</td>
+              <td><button className="btn btn-ghost btn-icon btn-sm" onClick={()=>onDelete(p.id)}>×</button></td>
+            </tr>
+          );
+        })}</tbody>
       </table></div>
     </div>
   );
@@ -633,7 +659,7 @@ function DashboardView({ state, prices, divInfo, onRefresh, refreshing }) {
   );
 }
 
-function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, onEditTranches, onSell, onNews, onDividendInfo, onEditCash, onDeleteSold }) {
+function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, onSell, onNews, onDividendInfo, onEditCash, onDeleteSold }) {
   const at=ACCOUNT_TYPES.find(a=>a.id===accountId);
   const acct=state.accounts[accountId]||{cash:0,deposits:0,withdrawals:0};
   const holdings=state.holdings.filter(h=>h.accountId===accountId);
@@ -670,7 +696,7 @@ function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, 
           <div><div className="section-title">Holdings</div></div>
           <div style={{display:"flex",gap:8}}><button className="btn btn-ghost btn-sm" onClick={exportData}>↓ CSV</button><button className="btn btn-primary btn-sm" onClick={onAddHolding}>+ Add Security</button></div>
         </div>
-        <HoldingsTable holdings={holdings} prices={prices} divInfo={divInfo} onEdit={onEdit} onEditTranches={onEditTranches} onSell={onSell} onNews={onNews} onDividendInfo={onDividendInfo}/>
+        <HoldingsTable holdings={holdings} prices={prices} divInfo={divInfo} onEdit={onEdit} onSell={onSell} onNews={onNews} onDividendInfo={onDividendInfo}/>
       </div>
       <SoldPositionsTable positions={soldHere} onDelete={onDeleteSold}/>
       {holdings.length>0&&(
@@ -790,16 +816,28 @@ export default function App() {
     setRefreshing(false);
   },[state.holdings,prices]);
 
-  const handleSaveHolding=async({accountId,ticker,name,exchange,tranche,isEdit,existingId})=>{
+  const handleSaveHolding=async({accountId,ticker,name,exchange,isEdit,existingId,tranches:newTranches})=>{
     try{
       if(isEdit){
         await updateHolding(existingId,{ticker,name,exchange});
-        setState(s=>({...s,holdings:s.holdings.map(h=>h.id===existingId?{...h,ticker,name,exchange}:h)}));
+        const existingHolding=state.holdings.find(h=>h.id===existingId);
+        for(const t of newTranches){
+          const isExistingTranche=existingHolding?.tranches.find(et=>et.id===t.id);
+          if(isExistingTranche){ await updateTranche(t.id,{date:t.date,shares:t.shares,costPrice:t.costPrice,dividends:t.dividends}); }
+          else{ await addTranche({id:uid(),holdingId:existingId,date:t.date,shares:t.shares,costPrice:t.costPrice,dividends:t.dividends}); }
+        }
+        const updatedHoldings=await fetchHoldings();
+        setState(s=>({...s,holdings:updatedHoldings}));
         const d=await fetchPrice(ticker,exchange); if(d)setPrices(prev=>({...prev,[d.symbol]:d.price}));
       } else {
         const existing=state.holdings.find(h=>h.accountId===accountId&&h.ticker===ticker);
-        if(existing){ const tId=uid(); await addTranche({id:tId,holdingId:existing.id,...tranche}); setState(s=>({...s,holdings:s.holdings.map(h=>h.id===existing.id?{...h,tranches:[...h.tranches,{id:tId,...tranche}]}:h)})); }
-        else{ const hId=uid(),tId=uid(); await addHolding({id:hId,accountId,ticker,name,exchange}); await addTranche({id:tId,holdingId:hId,...tranche}); setState(s=>({...s,holdings:[...s.holdings,{id:hId,accountId,ticker,name,exchange,tranches:[{id:tId,...tranche}]}]})); }
+        const hId=existing?.id||uid();
+        if(!existing) await addHolding({id:hId,accountId,ticker,name,exchange});
+        for(const t of newTranches){
+          const tId=uid();
+          await addTranche({id:tId,holdingId:hId,date:t.date,shares:t.shares,costPrice:t.costPrice,dividends:t.dividends});
+          setState(s=>({...s,holdings:existing?s.holdings.map(h=>h.id===hId?{...h,tranches:[...h.tranches,{id:tId,...t}]}:h):[...s.holdings,{id:hId,accountId,ticker,name,exchange,tranches:[{id:tId,...t}]}]}));
+        }
         const d=await fetchPrice(ticker,exchange); if(d)setPrices(prev=>({...prev,[d.symbol]:d.price}));
       }
     }catch(e){alert("Error: "+e.message);}
@@ -873,7 +911,7 @@ export default function App() {
           <div className="sidebar-owner-label">Insights</div>
           <div className={`sidebar-item ${activeView==="analytics"?"active":""}`} onClick={()=>setActiveView("analytics")}><span className="icon">📊</span>Analytics</div>
         </div>
-        <div className="sidebar-footer"><p>Prices via Finnhub</p><p>Data via Supabase</p><p>{time.toLocaleTimeString("en-CA",{hour:"2-digit",minute:"2-digit"})}</p></div>
+        <div className="sidebar-footer"><p>Prices via Finnhub</p><p>News via GNews</p><p>Data via Supabase</p><p>{time.toLocaleTimeString("en-CA",{hour:"2-digit",minute:"2-digit"})}</p></div>
       </div>
       <div className="main">
         <div className="topbar">
@@ -890,14 +928,13 @@ export default function App() {
         </div>
         <div className="content">
           {activeView==="dashboard"&&<DashboardView state={state} prices={prices} divInfo={divInfo} onRefresh={refreshPrices} refreshing={refreshing}/>}
-          {ACCOUNT_IDS.includes(activeView)&&<AccountView accountId={activeView} state={state} prices={prices} divInfo={divInfo} onAddHolding={()=>setModal({type:"addHolding",data:{accountId:activeView}})} onEdit={h=>setModal({type:"editHolding",data:h})} onEditTranches={h=>setModal({type:"editTranches",data:h})} onSell={h=>setModal({type:"sell",data:h})} onNews={h=>setModal({type:"news",data:h})} onDividendInfo={h=>setModal({type:"dividendInfo",data:h})} onEditCash={()=>setModal({type:"cash",data:{accountId:activeView}})} onDeleteSold={handleDeleteSold}/>}
+          {ACCOUNT_IDS.includes(activeView)&&<AccountView accountId={activeView} state={state} prices={prices} divInfo={divInfo} onAddHolding={()=>setModal({type:"addHolding",data:{accountId:activeView}})} onEdit={h=>setModal({type:"editHolding",data:h})} onSell={h=>setModal({type:"sell",data:h})} onNews={h=>setModal({type:"news",data:h})} onDividendInfo={h=>setModal({type:"dividendInfo",data:h})} onEditCash={()=>setModal({type:"cash",data:{accountId:activeView}})} onDeleteSold={handleDeleteSold}/>}
           {activeView==="analytics"&&<AnalyticsView state={state} prices={prices} divInfo={divInfo}/>}
         </div>
       </div>
     </div>
     {modal?.type==="addHolding"&&<HoldingModal defaultAccountId={modal.data.accountId} onClose={()=>setModal(null)} onSave={handleSaveHolding}/>}
     {modal?.type==="editHolding"&&<HoldingModal existing={modal.data} onClose={()=>setModal(null)} onSave={handleSaveHolding}/>}
-    {modal?.type==="editTranches"&&<EditTrancheModal holding={modal.data} onClose={()=>setModal(null)} onSaveTranche={handleUpdateTranche} onDeleteTranche={handleDeleteTranche} onAddTranche={tr=>handleAddTranche(modal.data.id,tr)}/>}
     {modal?.type==="sell"&&<SellModal holding={modal.data} prices={prices} onClose={()=>setModal(null)} onSell={(data)=>handleSell(modal.data,data)}/>}
     {modal?.type==="cash"&&<CashModal account={state.accounts[modal.data.accountId]||{id:modal.data.accountId,cash:0,deposits:0,withdrawals:0}} onClose={()=>setModal(null)} onSave={d=>handleUpdateCash(modal.data.accountId,d)}/>}
     {modal?.type==="news"&&<NewsPanel holding={modal.data} onClose={()=>setModal(null)}/>}
