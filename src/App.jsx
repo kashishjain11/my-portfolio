@@ -10,6 +10,7 @@ const FINNHUB_API_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const GNEWS_API_KEY = "12be21470662cfb31adbac431359c317";
 const GNEWS_BASE = "https://gnews.io/api/v4";
+const EXCHANGE_RATE_KEY = "d554cb1931122d2d7a0409c3";
 
 const GlobalStyle = () => (
   <style>{`
@@ -94,6 +95,7 @@ const GlobalStyle = () => (
     .text-right { text-align:right; }
     .badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:20px; font-size:10px; font-family:var(--mono); font-weight:500; letter-spacing:0.5px; }
     .badge-blue { background:var(--accent-dim); color:var(--accent); }
+    .badge-amber { background:var(--amber-dim); color:var(--amber); }
     .pos { color:var(--green); } .neg { color:var(--red); }
     .progress-bar { height:4px; background:var(--bg-4); border-radius:4px; overflow:hidden; }
     .progress-fill { height:100%; border-radius:4px; transition:width 0.5s ease; }
@@ -133,6 +135,7 @@ const GlobalStyle = () => (
     .tranche-row { background:var(--bg-3); border-radius:var(--radius-sm); padding:12px 14px; margin-bottom:8px; border:1px solid var(--border); }
     .divband { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border); font-size:12px; }
     .divband:last-child { border-bottom:none; }
+    .fx-badge { font-size:9px; font-family:var(--mono); background:var(--amber-dim); color:var(--amber); padding:1px 5px; border-radius:4px; margin-left:4px; }
   `}</style>
 );
 
@@ -147,17 +150,33 @@ const ACCOUNT_TYPES = [
 ];
 const COLORS = ["#4f9cf9","#3ecf8e","#a78bfa","#f5a623","#f66e6e","#22d3ee","#e879f9","#fb923c","#a3e635"];
 const EXCHANGES = ["TSX","NASDAQ","NYSE","TSX-V","CBOE","LSE","OTHER"];
+const USD_EXCHANGES = ["NASDAQ","NYSE","CBOE"];
 
 const fmt = (n,dec=2) => n==null?"—":n.toLocaleString("en-CA",{minimumFractionDigits:dec,maximumFractionDigits:dec});
-const fmtDollar = (n,showSign=false) => { if(n==null)return"—"; const s="$"+Math.abs(n).toLocaleString("en-CA",{minimumFractionDigits:2,maximumFractionDigits:2}); return showSign?(n>=0?"+"+s:"-"+s):(n<0?"-"+s:s); };
+const fmtDollar = (n,showSign=false,currency="CAD") => {
+  if(n==null)return"—";
+  const s=(currency==="USD"?"US$":"$")+Math.abs(n).toLocaleString("en-CA",{minimumFractionDigits:2,maximumFractionDigits:2});
+  return showSign?(n>=0?"+"+s:"-"+s):(n<0?"-"+s:s);
+};
 const fmtPct = (n,showSign=false) => n==null?"—":(showSign&&n>=0?"+":"")+fmt(n)+"%";
 const today = () => new Date().toISOString().split("T")[0];
 const uid = () => crypto.randomUUID();
+const isUSD = (exchange) => USD_EXCHANGES.includes(exchange);
 
 function resolveTicker(ticker, exchange) {
   const t = ticker.toUpperCase().replace(/\.TO$/i,"");
   if (["TSX","TSX-V"].includes(exchange)) return t + ".TO";
   return t;
+}
+
+// ── Exchange Rate ─────────────────────────────────────────────────────────────
+async function fetchUSDCAD() {
+  try {
+    const r = await fetch(`https://v6.exchangerate-api.com/v6/${EXCHANGE_RATE_KEY}/pair/USD/CAD`);
+    const d = await r.json();
+    if (d.conversion_rate) return d.conversion_rate;
+    return 1.36; // fallback
+  } catch { return 1.36; }
 }
 
 async function fetchPrice(ticker, exchange) {
@@ -214,82 +233,65 @@ function getSectorQuery(name, ticker) {
 async function fetchNews(ticker, exchange, name) {
   const cleanTicker = ticker.replace(".TO","").replace(".NS","").replace(".BO","");
   const cleanName = (name||"").replace(/['"]/g,"").trim();
-  
-  // Build progressive queries — start broad if name is long
   const shortName = cleanName.split(" ").slice(0,3).join(" ");
   const companyQ = encodeURIComponent(`${shortName} ${cleanTicker} stock`);
   const macroQ = encodeURIComponent(getSectorQuery(name||"", ticker));
-
   try {
     const [companyRes, macroRes] = await Promise.all([
       fetch(`${GNEWS_BASE}/search?q=${companyQ}&lang=en&max=6&sortby=publishedAt&token=${GNEWS_API_KEY}`),
       fetch(`${GNEWS_BASE}/search?q=${macroQ}&lang=en&max=4&sortby=publishedAt&token=${GNEWS_API_KEY}`),
     ]);
-
-    const [companyData, macroData] = await Promise.all([
-      companyRes.json(),
-      macroRes.json(),
-    ]);
-
+    const [companyData, macroData] = await Promise.all([companyRes.json(), macroRes.json()]);
     let companyArticles = (companyData.articles||[]).map(a=>({...a,category:"company"}));
-    
-    // Fallback: if no company news, try just the ticker
     if (companyArticles.length === 0) {
       const fallbackRes = await fetch(`${GNEWS_BASE}/search?q=${encodeURIComponent(cleanTicker+" stock shares")}&lang=en&max=6&sortby=publishedAt&token=${GNEWS_API_KEY}`);
       const fallbackData = await fallbackRes.json();
       companyArticles = (fallbackData.articles||[]).map(a=>({...a,category:"company"}));
     }
-
     const macroArticles = (macroData.articles||[]).map(a=>({...a,category:"macro"}));
     const seen = new Set();
     return [...companyArticles,...macroArticles].filter(a=>{
       if(seen.has(a.title))return false;
       seen.add(a.title); return true;
     });
-  } catch(e) { 
-    console.error("News fetch error:", e);
-    return []; 
-  }
-}
-  const companyQuery = encodeURIComponent(`"${name||ticker}" OR "${ticker}" stock`);
-  const macroQuery = encodeURIComponent(getSectorQuery(name||"", ticker));
-  try {
-    const [companyRes, macroRes] = await Promise.all([
-      fetch(`${GNEWS_BASE}/search?q=${companyQuery}&lang=en&max=5&sortby=publishedAt&token=${GNEWS_API_KEY}`),
-      fetch(`${GNEWS_BASE}/search?q=${macroQuery}&lang=en&max=4&sortby=publishedAt&token=${GNEWS_API_KEY}`),
-    ]);
-    const [companyData, macroData] = await Promise.all([companyRes.json(), macroRes.json()]);
-    const companyArticles = (companyData.articles||[]).map(a=>({...a,category:"company"}));
-    const macroArticles = (macroData.articles||[]).map(a=>({...a,category:"macro"}));
-    const seen = new Set();
-    return [...companyArticles,...macroArticles].filter(a=>{
-      if(seen.has(a.title))return false;
-      seen.add(a.title); return true;
-    });
-  } catch { return []; }
+  } catch(e) { console.error("News fetch error:",e); return []; }
 }
 
-function calcHolding(holding, prices, divInfo) {
+// ── Computed ──────────────────────────────────────────────────────────────────
+function calcHolding(holding, prices, divInfo, usdcad=1.36) {
   const totalShares=holding.tranches.reduce((s,t)=>s+t.shares,0);
-  const totalCost=holding.tranches.reduce((s,t)=>s+t.shares*t.costPrice,0);
-  const avgCost=totalShares>0?totalCost/totalShares:0;
+  const totalCostNative=holding.tranches.reduce((s,t)=>s+t.shares*t.costPrice,0);
+  const avgCostNative=totalShares>0?totalCostNative/totalShares:0;
   const manualDividends=holding.tranches.reduce((s,t)=>s+(t.dividends||0),0);
   const priceKey=resolveTicker(holding.ticker,holding.exchange);
-  const currentPrice=prices[priceKey]??null;
-  const marketValue=currentPrice?currentPrice*totalShares:null;
-  const gainLoss=marketValue!=null?marketValue-totalCost:null;
-  const gainLossPct=gainLoss!=null&&totalCost>0?(gainLoss/totalCost)*100:null;
+  const currentPriceNative=prices[priceKey]??null;
+  const fx = isUSD(holding.exchange) ? usdcad : 1;
+  // Native (original currency) values
+  const marketValueNative=currentPriceNative?currentPriceNative*totalShares:null;
+  // CAD values for totals
+  const totalCostCAD=totalCostNative*fx;
+  const avgCostCAD=avgCostNative*fx;
+  const marketValueCAD=marketValueNative!=null?marketValueNative*fx:null;
+  const gainLossCAD=marketValueCAD!=null?marketValueCAD-totalCostCAD:null;
+  const gainLossPct=gainLossCAD!=null&&totalCostCAD>0?(gainLossCAD/totalCostCAD)*100:null;
+  const manualDividendsCAD=manualDividends*fx;
   const info=divInfo?.[priceKey];
-  const estimatedAnnualDiv=info?.annualDPS!=null?info.annualDPS*totalShares:null;
+  const estimatedAnnualDivCAD=info?.annualDPS!=null?info.annualDPS*totalShares*fx:null;
   const dividendYield=info?.dividendYield??null;
-  return { totalShares,totalCost,avgCost,manualDividends,currentPrice,marketValue,gainLoss,gainLossPct,estimatedAnnualDiv,dividendYield };
+  const currency = isUSD(holding.exchange) ? "USD" : "CAD";
+  return {
+    totalShares, totalCostNative, avgCostNative, currentPriceNative, marketValueNative,
+    totalCostCAD, avgCostCAD, marketValueCAD, gainLossCAD, gainLossPct,
+    manualDividends, manualDividendsCAD, estimatedAnnualDivCAD, dividendYield,
+    currency, fx, isConverted: fx !== 1,
+  };
 }
 
-function calcAccount(accountId, holdings, prices, divInfo) {
+function calcAccount(accountId, holdings, prices, divInfo, usdcad) {
   const ah=holdings.filter(h=>h.accountId===accountId);
-  let totalCost=0,totalMarket=0,totalDivs=0;
-  ah.forEach(h=>{ const c=calcHolding(h,prices,divInfo); totalCost+=c.totalCost; totalMarket+=c.marketValue??c.totalCost; totalDivs+=c.manualDividends; });
-  return { totalCost,totalMarket,totalDivs,holdingCount:ah.length };
+  let totalCostCAD=0,totalMarketCAD=0,totalDivsCAD=0;
+  ah.forEach(h=>{ const c=calcHolding(h,prices,divInfo,usdcad); totalCostCAD+=c.totalCostCAD; totalMarketCAD+=c.marketValueCAD??c.totalCostCAD; totalDivsCAD+=c.manualDividendsCAD; });
+  return { totalCostCAD,totalMarketCAD,totalDivsCAD,holdingCount:ah.length };
 }
 
 function exportCSV(rows,filename) {
@@ -369,12 +371,10 @@ function Modal({ title, onClose, children, footer }) {
 }
 
 function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
-  const isEdit = !!existing;
+  const isEdit=!!existing;
   const [form,setForm]=useState({
     accountId:existing?.accountId||defaultAccountId||"rrsp_k",
-    ticker:existing?.ticker||"",
-    name:existing?.name||"",
-    exchange:existing?.exchange||"TSX",
+    ticker:existing?.ticker||"", name:existing?.name||"", exchange:existing?.exchange||"TSX",
   });
   const [tranches,setTranches]=useState(
     existing?.tranches?.map(t=>({...t}))||[{id:"new_0",date:today(),shares:"",costPrice:"",dividends:""}]
@@ -397,6 +397,7 @@ function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
     });
     setSaving(false); onClose();
   };
+  const currencyNote = isUSD(form.exchange) ? "Prices in USD — will be converted to CAD for totals" : "Prices in CAD";
   return (
     <Modal title={isEdit?"Edit Security":"Add / Buy Security"} onClose={onClose}
       footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={save} disabled={saving}>{saving?"Saving…":isEdit?"Save Changes":"Add Holding"}</button></>}>
@@ -406,13 +407,16 @@ function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
             {ACCOUNT_TYPES.map(a=><option key={a.id} value={a.id}>{a.label}</option>)}
           </select>
         </div>
-        <div className="form-group"><label>Ticker Symbol</label><input placeholder="e.g. VFV.TO" value={form.ticker} onChange={e=>update("ticker",e.target.value)}/></div>
+        <div className="form-group"><label>Ticker Symbol</label><input placeholder="e.g. VFV.TO or HDB" value={form.ticker} onChange={e=>update("ticker",e.target.value)}/></div>
         <div className="form-group"><label>Exchange</label>
           <select value={form.exchange} onChange={e=>update("exchange",e.target.value)}>
             {EXCHANGES.map(x=><option key={x}>{x}</option>)}
           </select>
         </div>
-        <div className="form-group full"><label>Security Name</label><input placeholder="e.g. Vanguard S&P 500 ETF" value={form.name} onChange={e=>update("name",e.target.value)}/></div>
+        <div className="form-group full"><label>Security Name</label><input placeholder="e.g. HDFC Bank Limited" value={form.name} onChange={e=>update("name",e.target.value)}/></div>
+      </div>
+      <div style={{fontSize:11,color:isUSD(form.exchange)?"var(--amber)":"var(--green)",fontFamily:"var(--mono)",marginTop:8,marginBottom:4}}>
+        {currencyNote}
       </div>
       <div className="divider"/>
       <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>{isEdit?"Edit Purchases":"Purchase Details"}</div>
@@ -425,38 +429,40 @@ function HoldingModal({ onClose, onSave, defaultAccountId, existing }) {
           <div className="form-grid">
             <div className="form-group"><label>Date</label><input type="date" value={t.date} onChange={e=>updateT(t.id,"date",e.target.value)}/></div>
             <div className="form-group"><label>Shares</label><input type="number" placeholder="0.00" value={t.shares} onChange={e=>updateT(t.id,"shares",e.target.value)}/></div>
-            <div className="form-group"><label>Cost Price / Share ($)</label><input type="number" placeholder="0.00" value={t.costPrice} onChange={e=>updateT(t.id,"costPrice",e.target.value)}/></div>
-            <div className="form-group"><label>Dividends ($)</label><input type="number" placeholder="0.00" value={t.dividends} onChange={e=>updateT(t.id,"dividends",e.target.value)}/></div>
+            <div className="form-group"><label>Cost Price / Share ({isUSD(form.exchange)?"USD":"CAD"})</label><input type="number" placeholder="0.00" value={t.costPrice} onChange={e=>updateT(t.id,"costPrice",e.target.value)}/></div>
+            <div className="form-group"><label>Dividends ({isUSD(form.exchange)?"USD":"CAD"})</label><input type="number" placeholder="0.00" value={t.dividends} onChange={e=>updateT(t.id,"dividends",e.target.value)}/></div>
           </div>
         </div>
       ))}
       <button className="btn btn-ghost btn-sm" style={{marginTop:8}} onClick={addNewTranche}>+ Add Another Purchase</button>
     </Modal>
   );
-}function SellModal({ holding, prices, onClose, onSell }) {
-  const c=calcHolding(holding,prices,{});
-  const [sellPrice,setSellPrice]=useState(c.currentPrice||"");
+}function SellModal({ holding, prices, usdcad, onClose, onSell }) {
+  const c=calcHolding(holding,prices,{},usdcad);
+  const [sellPrice,setSellPrice]=useState(c.currentPriceNative||"");
   const [sellDate,setSellDate]=useState(today());
   const [saving,setSaving]=useState(false);
-  const proceeds=parseFloat(sellPrice||0)*c.totalShares;
-  const gl=proceeds-c.totalCost;
-  const glPct=c.totalCost>0?(gl/c.totalCost)*100:0;
-  const save=async()=>{ if(!sellPrice)return; setSaving(true); await onSell({sellPrice:parseFloat(sellPrice),sellDate,proceeds,gainLoss:gl,gainLossPct:glPct}); setSaving(false); onClose(); };
+  const proceedsNative=parseFloat(sellPrice||0)*c.totalShares;
+  const proceedsCAD=proceedsNative*c.fx;
+  const gl=proceedsCAD-c.totalCostCAD;
+  const glPct=c.totalCostCAD>0?(gl/c.totalCostCAD)*100:0;
+  const save=async()=>{ if(!sellPrice)return; setSaving(true); await onSell({sellPrice:parseFloat(sellPrice),sellDate,proceeds:proceedsCAD,gainLoss:gl,gainLossPct:glPct}); setSaving(false); onClose(); };
   return (
     <Modal title={`Sell Position — ${holding.ticker}`} onClose={onClose}
       footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-danger" onClick={save} disabled={saving}>{saving?"Processing…":"Confirm Sale"}</button></>}>
       <div style={{background:"var(--bg-3)",borderRadius:"var(--radius-sm)",padding:"12px 16px",marginBottom:16,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
         <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>SHARES</div><div style={{fontWeight:700}}>{fmt(c.totalShares,0)}</div></div>
-        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>AVG COST</div><div style={{fontWeight:700}}>{fmtDollar(c.avgCost)}</div></div>
-        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>TOTAL COST</div><div style={{fontWeight:700}}>{fmtDollar(c.totalCost)}</div></div>
+        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>AVG COST ({c.currency})</div><div style={{fontWeight:700}}>{fmtDollar(c.avgCostNative,false,c.currency)}</div></div>
+        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>TOTAL COST (CAD)</div><div style={{fontWeight:700}}>{fmtDollar(c.totalCostCAD)}</div></div>
       </div>
+      {c.isConverted&&<div style={{fontSize:11,color:"var(--amber)",fontFamily:"var(--mono)",marginBottom:12}}>Rate: 1 USD = {fmt(usdcad)} CAD · All totals in CAD</div>}
       <div className="form-grid">
-        <div className="form-group"><label>Sell Price / Share ($)</label><input type="number" placeholder="0.00" value={sellPrice} onChange={e=>setSellPrice(e.target.value)}/></div>
+        <div className="form-group"><label>Sell Price / Share ({c.currency})</label><input type="number" placeholder="0.00" value={sellPrice} onChange={e=>setSellPrice(e.target.value)}/></div>
         <div className="form-group"><label>Sell Date</label><input type="date" value={sellDate} onChange={e=>setSellDate(e.target.value)}/></div>
       </div>
       {sellPrice&&<div style={{marginTop:16,background:"var(--bg-3)",borderRadius:"var(--radius-sm)",padding:"12px 16px",display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>PROCEEDS</div><div style={{fontWeight:700}}>{fmtDollar(proceeds)}</div></div>
-        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>GAIN/LOSS</div><div style={{fontWeight:700,color:gl>=0?"var(--green)":"var(--red)"}}>{fmtDollar(gl,true)}</div></div>
+        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>PROCEEDS (CAD)</div><div style={{fontWeight:700}}>{fmtDollar(proceedsCAD)}</div></div>
+        <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>GAIN/LOSS (CAD)</div><div style={{fontWeight:700,color:gl>=0?"var(--green)":"var(--red)"}}>{fmtDollar(gl,true)}</div></div>
         <div><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:3}}>RETURN</div><div style={{fontWeight:700,color:glPct>=0?"var(--green)":"var(--red)"}}>{fmtPct(glPct,true)}</div></div>
       </div>}
     </Modal>
@@ -474,33 +480,36 @@ function CashModal({ account, onClose, onSave }) {
     <Modal title={`Cash & Deposits — ${at?.label}`} onClose={onClose}
       footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={apply} disabled={saving}>{saving?"Saving…":"Update"}</button></>}>
       <div className="form-grid">
-        <div className="form-group full"><label>Cash Balance ($)</label><input type="number" value={cash} onChange={e=>setCash(e.target.value)}/></div>
-        <div className="form-group"><label>Add Deposit ($)</label><input type="number" placeholder="0.00" value={deposit} onChange={e=>setDeposit(e.target.value)}/></div>
-        <div className="form-group"><label>Withdrawal ($)</label><input type="number" placeholder="0.00" value={withdraw} onChange={e=>setWithdraw(e.target.value)}/></div>
+        <div className="form-group full"><label>Cash Balance (CAD $)</label><input type="number" value={cash} onChange={e=>setCash(e.target.value)}/></div>
+        <div className="form-group"><label>Add Deposit (CAD $)</label><input type="number" placeholder="0.00" value={deposit} onChange={e=>setDeposit(e.target.value)}/></div>
+        <div className="form-group"><label>Withdrawal (CAD $)</label><input type="number" placeholder="0.00" value={withdraw} onChange={e=>setWithdraw(e.target.value)}/></div>
       </div>
     </Modal>
   );
 }
 
-function DividendInfoModal({ holding, divInfo, onClose }) {
+function DividendInfoModal({ holding, divInfo, usdcad, onClose }) {
   const [upcoming,setUpcoming]=useState([]);
   const [loading,setLoading]=useState(true);
   const priceKey=resolveTicker(holding.ticker,holding.exchange);
   const info=divInfo?.[priceKey];
+  const fx=isUSD(holding.exchange)?usdcad:1;
   useEffect(()=>{ fetchUpcomingDividends(holding.ticker,holding.exchange).then(d=>{setUpcoming(d);setLoading(false);}); },[]);
   return (
     <Modal title={`Dividends — ${holding.ticker}`} onClose={onClose}>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-        <div style={{background:"var(--bg-3)",padding:"12px",borderRadius:"var(--radius-sm)"}}><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:4}}>ANNUAL DPS</div><div style={{fontWeight:700,fontSize:18}}>{info?.annualDPS!=null?fmtDollar(info.annualDPS):"N/A"}</div></div>
-        <div style={{background:"var(--bg-3)",padding:"12px",borderRadius:"var(--radius-sm)"}}><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:4}}>DIV YIELD</div><div style={{fontWeight:700,fontSize:18,color:"var(--purple)"}}>{info?.dividendYield!=null?fmtPct(info.dividendYield):"N/A"}</div></div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
+        <div style={{background:"var(--bg-3)",padding:"12px",borderRadius:"var(--radius-sm)"}}><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:4}}>ANNUAL DPS</div><div style={{fontWeight:700,fontSize:16}}>{info?.annualDPS!=null?fmtDollar(info.annualDPS,false,isUSD(holding.exchange)?"USD":"CAD"):"N/A"}</div></div>
+        <div style={{background:"var(--bg-3)",padding:"12px",borderRadius:"var(--radius-sm)"}}><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:4}}>DIV YIELD</div><div style={{fontWeight:700,fontSize:16,color:"var(--purple)"}}>{info?.dividendYield!=null?fmtPct(info.dividendYield):"N/A"}</div></div>
+        <div style={{background:"var(--bg-3)",padding:"12px",borderRadius:"var(--radius-sm)"}}><div style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:4}}>ANNUAL (CAD)</div><div style={{fontWeight:700,fontSize:16,color:"var(--green)"}}>{info?.annualDPS!=null?fmtDollar(info.annualDPS*fx):"N/A"}</div></div>
       </div>
+      {isUSD(holding.exchange)&&<div style={{fontSize:11,color:"var(--amber)",fontFamily:"var(--mono)",marginBottom:12}}>Rate: 1 USD = {fmt(usdcad)} CAD</div>}
       <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Upcoming Ex-Dividend Dates</div>
       {loading?<div className="empty"><div className="spinner"/></div>:upcoming.length===0?<div className="empty"><div className="icon">📅</div><p>No upcoming dividends found</p></div>:
         upcoming.map((d,i)=>(
           <div key={i} className="divband">
             <span style={{fontFamily:"var(--mono)",color:"var(--text-2)",fontSize:11}}>{d.date}</span>
             <span style={{flex:1,marginLeft:8}}>{d.symbol}</span>
-            <span style={{color:"var(--green)",fontFamily:"var(--mono)"}}>{d.amount!=null?fmtDollar(d.amount):""}</span>
+            <span style={{color:"var(--green)",fontFamily:"var(--mono)"}}>{d.amount!=null?fmtDollar(d.amount*fx):"—"}</span>
             <span className="badge badge-blue" style={{marginLeft:8}}>{d.payDate||"—"}</span>
           </div>
         ))
@@ -525,7 +534,7 @@ function NewsPanel({ holding, onClose }) {
         </div>
       )}
       {loading?<div className="empty"><div className="spinner"/></div>
-        :filtered.length===0?<div className="empty"><div className="icon">📭</div><p>No news found</p></div>
+        :filtered.length===0?<div className="empty"><div className="icon">📭</div><p>No news found — daily limit may be reached, try again tomorrow</p></div>
         :filtered.map((n,i)=>(
           <div key={i} style={{padding:"12px 0",borderBottom:i<filtered.length-1?"1px solid var(--border)":"none"}}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
@@ -542,48 +551,56 @@ function NewsPanel({ holding, onClose }) {
   );
 }
 
-function HoldingsTable({ holdings, prices, divInfo, onEdit, onSell, onNews, onDividendInfo }) {
-  const totalMarket=holdings.reduce((s,h)=>{const c=calcHolding(h,prices,divInfo);return s+(c.marketValue||c.totalCost);},0);
+function HoldingsTable({ holdings, prices, divInfo, usdcad, onEdit, onSell, onNews, onDividendInfo }) {
+  const totalMarketCAD=holdings.reduce((s,h)=>{const c=calcHolding(h,prices,divInfo,usdcad);return s+(c.marketValueCAD||c.totalCostCAD);},0);
   return (
     <div className="table-wrap">
       <table>
         <thead><tr>
           <th></th><th>Ticker</th><th>Security</th><th>Exch</th><th>Shares</th>
           <th className="text-right">Avg Cost</th><th className="text-right">Total Cost</th>
-          <th className="text-right">Price</th><th className="text-right">Mkt Value</th>
-          <th className="text-right">Gain $</th><th className="text-right">Gain %</th>
-          <th className="text-right">Weight</th><th className="text-right">Div/Yr</th><th className="text-right">Yld</th>
+          <th className="text-right">Price</th><th className="text-right">Mkt Value (CAD)</th>
+          <th className="text-right">Gain $ (CAD)</th><th className="text-right">Gain %</th>
+          <th className="text-right">Weight</th><th className="text-right">Div/Yr (CAD)</th><th className="text-right">Yld</th>
         </tr></thead>
         <tbody>
           {holdings.length===0
             ?<tr><td colSpan={14}><div className="empty"><div className="icon">📈</div><p>No holdings yet — add your first security</p></div></td></tr>
             :holdings.map(h=>{
-              const c=calcHolding(h,prices,divInfo);
-              const effectiveVal=c.marketValue??c.totalCost;
-              const weight=totalMarket>0?(effectiveVal/totalMarket)*100:0;
+              const c=calcHolding(h,prices,divInfo,usdcad);
+              const effectiveValCAD=c.marketValueCAD??c.totalCostCAD;
+              const weight=totalMarketCAD>0?(effectiveValCAD/totalMarketCAD)*100:0;
               const at=ACCOUNT_TYPES.find(a=>a.id===h.accountId);
               return (
                 <tr key={h.id}>
                   <td>
                     <div style={{display:"flex",gap:3}}>
-                      <button className="btn btn-ghost btn-icon btn-sm" title="Edit security" onClick={()=>onEdit(h)}>✏️</button>
+                      <button className="btn btn-ghost btn-icon btn-sm" title="Edit" onClick={()=>onEdit(h)}>✏️</button>
                       <button className="btn btn-ghost btn-icon btn-sm" title="News" onClick={()=>onNews(h)}>📰</button>
                       <button className="btn btn-ghost btn-icon btn-sm" title="Dividends" onClick={()=>onDividendInfo(h)}>💰</button>
-                      <button className="btn btn-danger btn-icon btn-sm" title="Sell position" onClick={()=>onSell(h)}>💸</button>
+                      <button className="btn btn-danger btn-icon btn-sm" title="Sell" onClick={()=>onSell(h)}>💸</button>
                     </div>
                   </td>
-                  <td><span className="ticker" style={{borderLeft:`3px solid ${at?.color||"var(--accent)"}`,paddingLeft:6}}>{h.ticker}</span></td>
-                  <td style={{maxWidth:160,overflow:"hidden",textOverflow:"ellipsis"}}>{h.name}</td>
+                  <td>
+                    <span className="ticker" style={{borderLeft:`3px solid ${at?.color||"var(--accent)"}`,paddingLeft:6}}>{h.ticker}</span>
+                    {c.isConverted&&<span className="fx-badge">USD→CAD</span>}
+                  </td>
+                  <td style={{maxWidth:150,overflow:"hidden",textOverflow:"ellipsis"}}>{h.name}</td>
                   <td><span className="badge badge-blue">{h.exchange}</span></td>
                   <td className="mono">{fmt(c.totalShares,0)}</td>
-                  <td className="mono text-right">{fmtDollar(c.avgCost)}</td>
-                  <td className="mono text-right">{fmtDollar(c.totalCost)}</td>
-                  <td className="mono text-right">{c.currentPrice?fmtDollar(c.currentPrice):<span style={{color:"var(--text-2)",fontSize:10}}>…</span>}</td>
-                  <td className="mono text-right">{fmtDollar(effectiveVal)}</td>
-                  <td className={`mono text-right ${c.gainLoss==null?"":c.gainLoss>=0?"pos":"neg"}`}>{c.gainLoss!=null?fmtDollar(c.gainLoss,true):"—"}</td>
+                  <td className="mono text-right">
+                    {fmtDollar(c.avgCostNative,false,c.currency)}
+                    {c.isConverted&&<div style={{fontSize:9,color:"var(--text-2)"}}>{fmtDollar(c.avgCostCAD)} CAD</div>}
+                  </td>
+                  <td className="mono text-right">{fmtDollar(c.totalCostCAD)}</td>
+                  <td className="mono text-right">
+                    {c.currentPriceNative?fmtDollar(c.currentPriceNative,false,c.currency):<span style={{color:"var(--text-2)",fontSize:10}}>…</span>}
+                  </td>
+                  <td className="mono text-right">{fmtDollar(effectiveValCAD)}</td>
+                  <td className={`mono text-right ${c.gainLossCAD==null?"":c.gainLossCAD>=0?"pos":"neg"}`}>{c.gainLossCAD!=null?fmtDollar(c.gainLossCAD,true):"—"}</td>
                   <td className={`mono text-right ${c.gainLossPct==null?"":c.gainLossPct>=0?"pos":"neg"}`}>{c.gainLossPct!=null?fmtPct(c.gainLossPct,true):"—"}</td>
                   <td><div style={{display:"flex",alignItems:"center",gap:6}}><div className="progress-bar" style={{width:50}}><div className="progress-fill" style={{width:`${Math.min(weight,100)}%`,background:at?.color||"var(--accent)"}}/></div><span className="mono" style={{fontSize:10,color:"var(--text-1)"}}>{fmt(weight,1)}%</span></div></td>
-                  <td className="mono text-right" style={{color:"var(--purple)"}}>{c.estimatedAnnualDiv!=null?fmtDollar(c.estimatedAnnualDiv):"—"}</td>
+                  <td className="mono text-right" style={{color:"var(--purple)"}}>{c.estimatedAnnualDivCAD!=null?fmtDollar(c.estimatedAnnualDivCAD):"—"}</td>
                   <td className="mono text-right" style={{color:"var(--purple)"}}>{c.dividendYield!=null?fmtPct(c.dividendYield):"—"}</td>
                 </tr>
               );
@@ -600,10 +617,10 @@ function SoldPositionsTable({ positions, onDelete }) {
   return (
     <div className="section">
       <div className="section-header">
-        <div><div className="section-title">Closed Positions</div><div className="section-sub">Booked P&L: <span className={totalGL>=0?"pos":"neg"}>{fmtDollar(totalGL,true)}</span></div></div>
+        <div><div className="section-title">Closed Positions</div><div className="section-sub">Booked P&L (CAD): <span className={totalGL>=0?"pos":"neg"}>{fmtDollar(totalGL,true)}</span></div></div>
       </div>
       <div className="table-wrap"><table>
-        <thead><tr><th>Ticker</th><th>Account</th><th>Shares</th><th className="text-right">Avg Cost</th><th className="text-right">Sell Price</th><th className="text-right">Proceeds</th><th className="text-right">Gain $</th><th className="text-right">Gain %</th><th>Sell Date</th><th></th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Account</th><th>Shares</th><th className="text-right">Avg Cost</th><th className="text-right">Sell Price</th><th className="text-right">Proceeds (CAD)</th><th className="text-right">Gain $ (CAD)</th><th className="text-right">Gain %</th><th>Sell Date</th><th></th></tr></thead>
         <tbody>{positions.map(p=>{
           const at=ACCOUNT_TYPES.find(a=>a.id===p.accountId);
           return (
@@ -626,28 +643,33 @@ function SoldPositionsTable({ positions, onDelete }) {
   );
 }
 
-function DashboardView({ state, prices, divInfo, onRefresh, refreshing }) {
+function DashboardView({ state, prices, divInfo, usdcad, onRefresh, refreshing }) {
   const {holdings,accounts,soldPositions}=state;
-  let totalMarket=0,totalCost=0,totalDivs=0,totalCash=0,totalDeposits=0;
-  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo);totalCost+=c.totalCost;totalMarket+=c.marketValue??c.totalCost;totalDivs+=c.manualDividends;});
+  let totalMarketCAD=0,totalCostCAD=0,totalDivsCAD=0,totalCash=0,totalDeposits=0;
+  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo,usdcad);totalCostCAD+=c.totalCostCAD;totalMarketCAD+=c.marketValueCAD??c.totalCostCAD;totalDivsCAD+=c.manualDividendsCAD;});
   Object.values(accounts).forEach(a=>{totalCash+=a.cash||0;totalDeposits+=a.deposits||0;});
-  const totalGL=totalMarket-totalCost;
-  const totalPortfolio=totalMarket+totalCash;
+  const totalGL=totalMarketCAD-totalCostCAD;
+  const totalPortfolio=totalMarketCAD+totalCash;
   const trueReturn=totalDeposits>0?((totalPortfolio-totalDeposits)/totalDeposits)*100:0;
   const bookedGL=soldPositions.reduce((s,p)=>s+p.gainLoss,0);
-  const acctBreakdown=ACCOUNT_TYPES.map(at=>{const acct=accounts[at.id]||{cash:0,deposits:0};const c=calcAccount(at.id,holdings,prices,divInfo);return{...at,...c,cash:acct.cash||0,total:c.totalMarket+(acct.cash||0),deposits:acct.deposits||0};});
+  const acctBreakdown=ACCOUNT_TYPES.map(at=>{const acct=accounts[at.id]||{cash:0,deposits:0};const c=calcAccount(at.id,holdings,prices,divInfo,usdcad);return{...at,...c,cash:acct.cash||0,total:c.totalMarketCAD+(acct.cash||0),deposits:acct.deposits||0};});
   const pieData=acctBreakdown.filter(a=>a.total>0).map(a=>({label:a.label,value:a.total,color:a.color}));
   const perfData=useMemo(()=>{const pts=[totalDeposits*0.78];for(let i=1;i<11;i++)pts.push(pts[i-1]*(1+(Math.random()*0.04-0.005)));pts.push(totalPortfolio);return pts;},[totalDeposits,totalPortfolio]);
   const kashishTotal=acctBreakdown.filter(a=>a.owner==="Kashish").reduce((s,a)=>s+a.total,0);
   const djTotal=acctBreakdown.filter(a=>a.owner==="DJ").reduce((s,a)=>s+a.total,0);
   return (
     <>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,padding:"8px 12px",background:"var(--bg-3)",borderRadius:"var(--radius-sm)",width:"fit-content"}}>
+        <span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>USD/CAD Rate:</span>
+        <span style={{fontSize:12,fontWeight:700,color:"var(--amber)",fontFamily:"var(--mono)"}}>{fmt(usdcad,4)}</span>
+        <span style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)"}}>· All values in CAD</span>
+      </div>
       <div className="stats-grid">
-        <div className="stat-card accent"><div className="stat-label">Total Household</div><div className="stat-value">{fmtDollar(totalPortfolio)}</div><div className="stat-sub">All accounts + cash</div></div>
-        <div className={`stat-card ${totalGL>=0?"green":"red"}`}><div className="stat-label">Unrealized Gain</div><div className="stat-value" style={{color:totalGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(totalGL,true)}</div><div className="stat-sub">{fmtPct(totalCost>0?(totalGL/totalCost)*100:0,true)} on cost</div></div>
-        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldPositions.length} closed positions</div></div>
-        <div className="stat-card purple"><div className="stat-label">Dividends</div><div className="stat-value" style={{color:"var(--purple)"}}>{fmtDollar(totalDivs)}</div><div className="stat-sub">Received to date</div></div>
-        <div className="stat-card amber"><div className="stat-label">Cash</div><div className="stat-value" style={{color:"var(--amber)"}}>{fmtDollar(totalCash)}</div></div>
+        <div className="stat-card accent"><div className="stat-label">Total Household (CAD)</div><div className="stat-value">{fmtDollar(totalPortfolio)}</div><div className="stat-sub">All accounts + cash</div></div>
+        <div className={`stat-card ${totalGL>=0?"green":"red"}`}><div className="stat-label">Unrealized Gain (CAD)</div><div className="stat-value" style={{color:totalGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(totalGL,true)}</div><div className="stat-sub">{fmtPct(totalCostCAD>0?(totalGL/totalCostCAD)*100:0,true)} on cost</div></div>
+        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L (CAD)</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldPositions.length} closed positions</div></div>
+        <div className="stat-card purple"><div className="stat-label">Dividends (CAD)</div><div className="stat-value" style={{color:"var(--purple)"}}>{fmtDollar(totalDivsCAD)}</div><div className="stat-sub">Received to date</div></div>
+        <div className="stat-card amber"><div className="stat-label">Cash (CAD)</div><div className="stat-value" style={{color:"var(--amber)"}}>{fmtDollar(totalCash)}</div></div>
         <div className="stat-card"><div className="stat-label">True Return</div><div className={`stat-value ${trueReturn>=0?"pos":"neg"}`}>{fmtPct(trueReturn,true)}</div><div className="stat-sub">vs {fmtDollar(totalDeposits)} deposited</div></div>
       </div>
       <div className="grid-2">
@@ -664,7 +686,7 @@ function DashboardView({ state, prices, divInfo, onRefresh, refreshing }) {
       </div>
       <div className="grid-2">
         <div className="card">
-          <div className="card-header"><div className="card-title">Portfolio Performance</div><button className="btn btn-ghost btn-sm" onClick={onRefresh} disabled={refreshing} style={{display:"flex",alignItems:"center",gap:6}}>{refreshing?<div className="spinner"/>:"⟳"} Refresh</button></div>
+          <div className="card-header"><div className="card-title">Portfolio Performance (CAD)</div><button className="btn btn-ghost btn-sm" onClick={onRefresh} disabled={refreshing} style={{display:"flex",alignItems:"center",gap:6}}>{refreshing?<div className="spinner"/>:"⟳"} Refresh</button></div>
           <LineChart data={perfData} height={130}/>
           <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}><span style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)"}}>12 mo ago</span><span style={{fontSize:10,color:"var(--text-2)",fontFamily:"var(--mono)"}}>Today</span></div>
         </div>
@@ -680,12 +702,12 @@ function DashboardView({ state, prices, divInfo, onRefresh, refreshing }) {
         <div className="section-header"><div className="section-title">Account Breakdown</div></div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14}}>
           {acctBreakdown.map(a=>{
-            const gl=a.totalMarket-a.totalCost;
+            const gl=a.totalMarketCAD-a.totalCostCAD;
             return (
               <div key={a.id} className="card" style={{borderTop:`3px solid ${a.color}`}}>
                 <div className="card-header"><span className="badge" style={{background:a.color+"22",color:a.color,fontSize:11}}>{a.label}</span><span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>{a.holdingCount} holdings</span></div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-                  <div><div style={{fontSize:9,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:2}}>INVESTED</div><div style={{fontWeight:700,fontSize:13}}>{fmtDollar(a.totalMarket)}</div></div>
+                  <div><div style={{fontSize:9,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:2}}>INVESTED</div><div style={{fontWeight:700,fontSize:13}}>{fmtDollar(a.totalMarketCAD)}</div></div>
                   <div><div style={{fontSize:9,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:2}}>GAIN/LOSS</div><div style={{fontWeight:700,fontSize:13,color:gl>=0?"var(--green)":"var(--red)"}}>{fmtDollar(gl,true)}</div></div>
                   <div><div style={{fontSize:9,color:"var(--text-2)",fontFamily:"var(--mono)",marginBottom:2}}>CASH</div><div style={{fontWeight:700,fontSize:13,color:"var(--amber)"}}>{fmtDollar(a.cash)}</div></div>
                 </div>
@@ -698,36 +720,38 @@ function DashboardView({ state, prices, divInfo, onRefresh, refreshing }) {
   );
 }
 
-function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, onSell, onNews, onDividendInfo, onEditCash, onDeleteSold }) {
+function AccountView({ accountId, state, prices, divInfo, usdcad, onAddHolding, onEdit, onSell, onNews, onDividendInfo, onEditCash, onDeleteSold }) {
   const at=ACCOUNT_TYPES.find(a=>a.id===accountId);
   const acct=state.accounts[accountId]||{cash:0,deposits:0,withdrawals:0};
   const holdings=state.holdings.filter(h=>h.accountId===accountId);
   const soldHere=state.soldPositions.filter(p=>p.accountId===accountId);
-  const c=calcAccount(accountId,holdings,prices,divInfo);
-  const gl=c.totalMarket-c.totalCost,glPct=c.totalCost>0?(gl/c.totalCost)*100:0;
-  const trueReturn=acct.deposits>0?((c.totalMarket+(acct.cash||0)-acct.deposits)/acct.deposits)*100:0;
+  const c=calcAccount(accountId,holdings,prices,divInfo,usdcad);
+  const gl=c.totalMarketCAD-c.totalCostCAD,glPct=c.totalCostCAD>0?(gl/c.totalCostCAD)*100:0;
+  const trueReturn=acct.deposits>0?((c.totalMarketCAD+(acct.cash||0)-acct.deposits)/acct.deposits)*100:0;
   const bookedGL=soldHere.reduce((s,p)=>s+p.gainLoss,0);
-  const pieData=holdings.map((h,i)=>{const hc=calcHolding(h,prices,divInfo);return{label:h.ticker,value:hc.marketValue??hc.totalCost,color:COLORS[i%COLORS.length]};});
-  const exportData=()=>{const rows=holdings.map(h=>{const hc=calcHolding(h,prices,divInfo);return{ticker:h.ticker,name:h.name,exchange:h.exchange,shares:hc.totalShares,avgCost:hc.avgCost,totalCost:hc.totalCost,currentPrice:hc.currentPrice,marketValue:hc.marketValue,gainLoss:hc.gainLoss,gainLossPct:hc.gainLossPct,dividends:hc.manualDividends,estAnnualDiv:hc.estimatedAnnualDiv};});exportCSV(rows,`${accountId}_holdings_${today()}.csv`);};
+  const pieData=holdings.map((h,i)=>{const hc=calcHolding(h,prices,divInfo,usdcad);return{label:h.ticker,value:hc.marketValueCAD??hc.totalCostCAD,color:COLORS[i%COLORS.length]};});
+  const exportData=()=>{const rows=holdings.map(h=>{const hc=calcHolding(h,prices,divInfo,usdcad);return{ticker:h.ticker,name:h.name,exchange:h.exchange,currency:hc.currency,shares:hc.totalShares,avgCostNative:hc.avgCostNative,avgCostCAD:hc.avgCostCAD,totalCostCAD:hc.totalCostCAD,currentPriceNative:hc.currentPriceNative,marketValueCAD:hc.marketValueCAD,gainLossCAD:hc.gainLossCAD,gainLossPct:hc.gainLossPct,dividendsCAD:hc.manualDividendsCAD};});exportCSV(rows,`${accountId}_holdings_${today()}.csv`);};
+  const hasUSD=holdings.some(h=>isUSD(h.exchange));
   return (
     <>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}}>
         <div style={{width:12,height:12,borderRadius:"50%",background:at?.color}}/>
         <span className="badge" style={{background:at?.color+"22",color:at?.color,fontSize:12}}>{at?.label}</span>
         <span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>{at?.owner==="Joint"?"Shared Account":at?.owner+"'s "+at?.type}</span>
+        {hasUSD&&<span style={{fontSize:11,color:"var(--amber)",fontFamily:"var(--mono)"}}>· USD/CAD: {fmt(usdcad,4)} · Totals in CAD</span>}
       </div>
       <div className="stats-grid">
-        <div className="stat-card accent"><div className="stat-label">Invested</div><div className="stat-value">{fmtDollar(c.totalMarket)}</div><div className="stat-sub">Market value</div></div>
-        <div className={`stat-card ${gl>=0?"green":"red"}`}><div className="stat-label">Unrealized Gain</div><div className="stat-value" style={{color:gl>=0?"var(--green)":"var(--red)"}}>{fmtDollar(gl,true)}</div><div className="stat-sub">{fmtPct(glPct,true)}</div></div>
-        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldHere.length} sold</div></div>
-        <div className="stat-card amber"><div className="stat-label">Cash</div><div className="stat-value" style={{color:"var(--amber)"}}>{fmtDollar(acct.cash||0)}</div><div className="stat-sub"><button className="btn btn-ghost btn-sm" onClick={onEditCash}>Update</button></div></div>
-        <div className="stat-card purple"><div className="stat-label">Dividends</div><div className="stat-value" style={{color:"var(--purple)"}}>{fmtDollar(c.totalDivs)}</div></div>
+        <div className="stat-card accent"><div className="stat-label">Invested (CAD)</div><div className="stat-value">{fmtDollar(c.totalMarketCAD)}</div><div className="stat-sub">Market value</div></div>
+        <div className={`stat-card ${gl>=0?"green":"red"}`}><div className="stat-label">Unrealized Gain (CAD)</div><div className="stat-value" style={{color:gl>=0?"var(--green)":"var(--red)"}}>{fmtDollar(gl,true)}</div><div className="stat-sub">{fmtPct(glPct,true)}</div></div>
+        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L (CAD)</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldHere.length} sold</div></div>
+        <div className="stat-card amber"><div className="stat-label">Cash (CAD)</div><div className="stat-value" style={{color:"var(--amber)"}}>{fmtDollar(acct.cash||0)}</div><div className="stat-sub"><button className="btn btn-ghost btn-sm" onClick={onEditCash}>Update</button></div></div>
+        <div className="stat-card purple"><div className="stat-label">Dividends (CAD)</div><div className="stat-value" style={{color:"var(--purple)"}}>{fmtDollar(c.totalDivsCAD)}</div></div>
         <div className="stat-card"><div className="stat-label">True Return</div><div className={`stat-value ${trueReturn>=0?"pos":"neg"}`}>{fmtPct(trueReturn,true)}</div><div className="stat-sub">vs {fmtDollar(acct.deposits)} deposited</div></div>
       </div>
       {holdings.length>0&&(
         <div className="grid-2">
-          <div className="card"><div className="card-header"><div className="card-title">Holdings Allocation</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={pieData} size={120}/><div className="legend" style={{flex:1}}>{pieData.slice(0,6).map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
-          <div className="card"><div className="card-header"><div className="card-title">Gain/Loss by Holding</div></div><BarChart bars={holdings.map(h=>{const hc=calcHolding(h,prices,divInfo);return{label:h.ticker,value:hc.gainLoss??0};})} /></div>
+          <div className="card"><div className="card-header"><div className="card-title">Holdings Allocation (CAD)</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={pieData} size={120}/><div className="legend" style={{flex:1}}>{pieData.slice(0,6).map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
+          <div className="card"><div className="card-header"><div className="card-title">Gain/Loss by Holding (CAD)</div></div><BarChart bars={holdings.map(h=>{const hc=calcHolding(h,prices,divInfo,usdcad);return{label:h.ticker,value:hc.gainLossCAD??0};})} /></div>
         </div>
       )}
       <div className="section">
@@ -735,17 +759,18 @@ function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, 
           <div><div className="section-title">Holdings</div></div>
           <div style={{display:"flex",gap:8}}><button className="btn btn-ghost btn-sm" onClick={exportData}>↓ CSV</button><button className="btn btn-primary btn-sm" onClick={onAddHolding}>+ Add Security</button></div>
         </div>
-        <HoldingsTable holdings={holdings} prices={prices} divInfo={divInfo} onEdit={onEdit} onSell={onSell} onNews={onNews} onDividendInfo={onDividendInfo}/>
+        <HoldingsTable holdings={holdings} prices={prices} divInfo={divInfo} usdcad={usdcad} onEdit={onEdit} onSell={onSell} onNews={onNews} onDividendInfo={onDividendInfo}/>
       </div>
       <SoldPositionsTable positions={soldHere} onDelete={onDeleteSold}/>
       {holdings.length>0&&(
         <div className="section">
           <div className="section-header"><div className="section-title">Transaction History</div></div>
           <div className="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Ticker</th><th>Shares</th><th className="text-right">Price</th><th className="text-right">Total</th><th className="text-right">Dividends</th></tr></thead>
-            <tbody>{holdings.flatMap(h=>h.tranches.map(t=>({...t,ticker:h.ticker}))).sort((a,b)=>b.date.localeCompare(a.date)).map((t,i)=>(
-              <tr key={i}><td className="mono">{t.date}</td><td><span className="ticker">{t.ticker}</span></td><td className="mono">{fmt(t.shares,0)}</td><td className="mono text-right">{fmtDollar(t.costPrice)}</td><td className="mono text-right">{fmtDollar(t.shares*t.costPrice)}</td><td className="mono text-right pos">{fmtDollar(t.dividends)}</td></tr>
-            ))}</tbody>
+            <thead><tr><th>Date</th><th>Ticker</th><th>Ccy</th><th>Shares</th><th className="text-right">Price</th><th className="text-right">Total (CAD)</th><th className="text-right">Dividends (CAD)</th></tr></thead>
+            <tbody>{holdings.flatMap(h=>h.tranches.map(t=>({...t,ticker:h.ticker,exchange:h.exchange}))).sort((a,b)=>b.date.localeCompare(a.date)).map((t,i)=>{
+              const fx=isUSD(t.exchange)?usdcad:1;
+              return(<tr key={i}><td className="mono">{t.date}</td><td><span className="ticker">{t.ticker}</span></td><td><span className="badge" style={{background:isUSD(t.exchange)?"var(--amber-dim)":"var(--green-dim)",color:isUSD(t.exchange)?"var(--amber)":"var(--green)",fontSize:9}}>{isUSD(t.exchange)?"USD":"CAD"}</span></td><td className="mono">{fmt(t.shares,0)}</td><td className="mono text-right">{fmtDollar(t.costPrice,false,isUSD(t.exchange)?"USD":"CAD")}</td><td className="mono text-right">{fmtDollar(t.shares*t.costPrice*fx)}</td><td className="mono text-right pos">{fmtDollar((t.dividends||0)*fx)}</td></tr>);
+            })}</tbody>
           </table></div>
         </div>
       )}
@@ -753,36 +778,36 @@ function AccountView({ accountId, state, prices, divInfo, onAddHolding, onEdit, 
   );
 }
 
-function AnalyticsView({ state, prices, divInfo }) {
+function AnalyticsView({ state, prices, divInfo, usdcad }) {
   const {holdings,accounts,soldPositions}=state;
-  let totalCost=0,totalMarket=0,totalDivs=0;
-  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo);totalCost+=c.totalCost;totalMarket+=c.marketValue??c.totalCost;totalDivs+=c.manualDividends;});
+  let totalCostCAD=0,totalMarketCAD=0,totalDivsCAD=0;
+  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo,usdcad);totalCostCAD+=c.totalCostCAD;totalMarketCAD+=c.marketValueCAD??c.totalCostCAD;totalDivsCAD+=c.manualDividendsCAD;});
   const totalDeposits=Object.values(accounts).reduce((s,a)=>s+(a.deposits||0),0);
-  const gainLoss=totalMarket-totalCost;
+  const gainLoss=totalMarketCAD-totalCostCAD;
   const bookedGL=soldPositions.reduce((s,p)=>s+p.gainLoss,0);
   const byExchange={};
-  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo);const v=c.marketValue??c.totalCost;byExchange[h.exchange]=(byExchange[h.exchange]||0)+v;});
+  holdings.forEach(h=>{const c=calcHolding(h,prices,divInfo,usdcad);const v=c.marketValueCAD??c.totalCostCAD;byExchange[h.exchange]=(byExchange[h.exchange]||0)+v;});
   const exchPie=Object.entries(byExchange).map(([k,v],i)=>({label:k,value:v,color:COLORS[i]}));
   const byOwner={Kashish:0,DJ:0,Joint:0};
-  holdings.forEach(h=>{const at=ACCOUNT_TYPES.find(a=>a.id===h.accountId);const c=calcHolding(h,prices,divInfo);if(at)byOwner[at.owner]=(byOwner[at.owner]||0)+(c.marketValue??c.totalCost);});
+  holdings.forEach(h=>{const at=ACCOUNT_TYPES.find(a=>a.id===h.accountId);const c=calcHolding(h,prices,divInfo,usdcad);if(at)byOwner[at.owner]=(byOwner[at.owner]||0)+(c.marketValueCAD??c.totalCostCAD);});
   const ownerPie=[{label:"Kashish",value:byOwner.Kashish,color:"#4f9cf9"},{label:"DJ",value:byOwner.DJ,color:"#f5a623"},{label:"Joint",value:byOwner.Joint,color:"#e879f9"}].filter(x=>x.value>0);
   return (
     <>
       <div className="stats-grid">
-        <div className="stat-card accent"><div className="stat-label">Unrealized Return</div><div className={`stat-value ${gainLoss>=0?"pos":"neg"}`}>{fmtPct(totalCost>0?(gainLoss/totalCost)*100:0,true)}</div></div>
-        <div className="stat-card green"><div className="stat-label">Unrealized Gain</div><div className={`stat-value ${gainLoss>=0?"pos":"neg"}`}>{fmtDollar(gainLoss,true)}</div></div>
-        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldPositions.length} positions</div></div>
-        <div className="stat-card purple"><div className="stat-label">Total Return + Divs</div><div className="stat-value pos">{fmtPct(totalCost>0?((gainLoss+totalDivs)/totalCost)*100:0,true)}</div></div>
+        <div className="stat-card accent"><div className="stat-label">Unrealized Return</div><div className={`stat-value ${gainLoss>=0?"pos":"neg"}`}>{fmtPct(totalCostCAD>0?(gainLoss/totalCostCAD)*100:0,true)}</div></div>
+        <div className="stat-card green"><div className="stat-label">Unrealized Gain (CAD)</div><div className={`stat-value ${gainLoss>=0?"pos":"neg"}`}>{fmtDollar(gainLoss,true)}</div></div>
+        <div className={`stat-card ${bookedGL>=0?"green":"red"}`}><div className="stat-label">Booked P&L (CAD)</div><div className="stat-value" style={{color:bookedGL>=0?"var(--green)":"var(--red)"}}>{fmtDollar(bookedGL,true)}</div><div className="stat-sub">{soldPositions.length} positions</div></div>
+        <div className="stat-card purple"><div className="stat-label">Total Return + Divs</div><div className="stat-value pos">{fmtPct(totalCostCAD>0?((gainLoss+totalDivsCAD)/totalCostCAD)*100:0,true)}</div></div>
       </div>
       <div className="grid-2">
-        <div className="card"><div className="card-header"><div className="card-title">By Exchange</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={exchPie} size={120}/><div className="legend" style={{flex:1}}>{exchPie.map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
-        <div className="card"><div className="card-header"><div className="card-title">By Owner</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={ownerPie} size={120}/><div className="legend" style={{flex:1}}>{ownerPie.map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
+        <div className="card"><div className="card-header"><div className="card-title">By Exchange (CAD)</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={exchPie} size={120}/><div className="legend" style={{flex:1}}>{exchPie.map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
+        <div className="card"><div className="card-header"><div className="card-title">By Owner (CAD)</div></div><div style={{display:"flex",gap:16,alignItems:"center"}}><PieChart segments={ownerPie} size={120}/><div className="legend" style={{flex:1}}>{ownerPie.map((s,i)=><div key={i} className="legend-item"><div className="legend-dot" style={{background:s.color}}/><span className="legend-label">{s.label}</span><span className="legend-val">{fmtDollar(s.value)}</span></div>)}</div></div></div>
       </div>
       <div className="grid-2">
         <div className="card">
-          <div className="card-header"><div className="card-title">Contributions vs Growth</div></div>
-          {[{label:"Total Deposits",value:totalDeposits,color:"var(--accent)"},{label:"Unrealized Gains",value:Math.max(gainLoss,0),color:"var(--green)"},{label:"Booked Gains",value:Math.max(bookedGL,0),color:"var(--teal)"},{label:"Dividends",value:totalDivs,color:"var(--purple)"}].map((row,i)=>{
-            const max=totalDeposits+Math.max(gainLoss,0)+Math.max(bookedGL,0)+totalDivs||1;
+          <div className="card-header"><div className="card-title">Contributions vs Growth (CAD)</div></div>
+          {[{label:"Total Deposits",value:totalDeposits,color:"var(--accent)"},{label:"Unrealized Gains",value:Math.max(gainLoss,0),color:"var(--green)"},{label:"Booked Gains",value:Math.max(bookedGL,0),color:"var(--teal)"},{label:"Dividends",value:totalDivsCAD,color:"var(--purple)"}].map((row,i)=>{
+            const max=totalDeposits+Math.max(gainLoss,0)+Math.max(bookedGL,0)+totalDivsCAD||1;
             return(<div key={i} style={{marginBottom:14}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:5,fontSize:12}}><span style={{color:"var(--text-1)"}}>{row.label}</span><span className="mono">{fmtDollar(row.value)}</span></div><div className="progress-bar"><div className="progress-fill" style={{width:`${Math.min((row.value/max)*100,100)}%`,background:row.color}}/></div></div>);
           })}
         </div>
@@ -790,7 +815,7 @@ function AnalyticsView({ state, prices, divInfo }) {
           <div className="card-header"><div className="card-title">Closed Positions Summary</div></div>
           {soldPositions.length===0?<div className="empty"><p>No closed positions yet</p></div>:
           <div className="table-wrap"><table>
-            <thead><tr><th>Ticker</th><th className="text-right">Gain $</th><th className="text-right">Return</th></tr></thead>
+            <thead><tr><th>Ticker</th><th className="text-right">Gain (CAD)</th><th className="text-right">Return</th></tr></thead>
             <tbody>{soldPositions.slice(0,8).map(p=>(
               <tr key={p.id}><td><span className="ticker">{p.ticker}</span></td><td className={`mono text-right ${p.gainLoss>=0?"pos":"neg"}`}>{fmtDollar(p.gainLoss,true)}</td><td className={`mono text-right ${p.gainLossPct>=0?"pos":"neg"}`}>{fmtPct(p.gainLossPct,true)}</td></tr>
             ))}</tbody>
@@ -798,13 +823,13 @@ function AnalyticsView({ state, prices, divInfo }) {
         </div>
       </div>
       <div className="section">
-        <div className="section-header"><div className="section-title">Performance Ranking — All Holdings</div></div>
+        <div className="section-header"><div className="section-title">Performance Ranking — All Holdings (CAD)</div></div>
         <div className="table-wrap"><table>
-          <thead><tr><th>Rank</th><th>Ticker</th><th>Owner</th><th className="text-right">Cost</th><th className="text-right">Value</th><th className="text-right">Gain $</th><th className="text-right">Gain %</th><th className="text-right">Div/Yr</th><th className="text-right">Total Ret</th></tr></thead>
-          <tbody>{holdings.map(h=>{const c=calcHolding(h,prices,divInfo);return{h,c};}).sort((a,b)=>(b.c.gainLossPct??-999)-(a.c.gainLossPct??-999)).map(({h,c},i)=>{
+          <thead><tr><th>Rank</th><th>Ticker</th><th>Ccy</th><th>Owner</th><th className="text-right">Cost (CAD)</th><th className="text-right">Value (CAD)</th><th className="text-right">Gain (CAD)</th><th className="text-right">Gain %</th><th className="text-right">Div/Yr (CAD)</th><th className="text-right">Total Ret</th></tr></thead>
+          <tbody>{holdings.map(h=>{const c=calcHolding(h,prices,divInfo,usdcad);return{h,c};}).sort((a,b)=>(b.c.gainLossPct??-999)-(a.c.gainLossPct??-999)).map(({h,c},i)=>{
             const at=ACCOUNT_TYPES.find(a=>a.id===h.accountId);
-            const totalReturn=c.gainLoss!=null?(c.gainLoss+c.manualDividends)/c.totalCost*100:null;
-            return(<tr key={h.id}><td><span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>#{i+1}</span></td><td><span className="ticker">{h.ticker}</span></td><td><span className="badge" style={{background:at?.color+"22",color:at?.color}}>{at?.owner}</span></td><td className="mono text-right">{fmtDollar(c.totalCost)}</td><td className="mono text-right">{fmtDollar(c.marketValue??c.totalCost)}</td><td className={`mono text-right ${c.gainLoss==null?"":c.gainLoss>=0?"pos":"neg"}`}>{c.gainLoss!=null?fmtDollar(c.gainLoss,true):"—"}</td><td className={`mono text-right ${c.gainLossPct==null?"":c.gainLossPct>=0?"pos":"neg"}`}>{c.gainLossPct!=null?fmtPct(c.gainLossPct,true):"—"}</td><td className="mono text-right" style={{color:"var(--purple)"}}>{c.estimatedAnnualDiv!=null?fmtDollar(c.estimatedAnnualDiv):"—"}</td><td className={`mono text-right ${totalReturn==null?"":totalReturn>=0?"pos":"neg"}`}>{totalReturn!=null?fmtPct(totalReturn,true):"—"}</td></tr>);
+            const totalReturn=c.gainLossCAD!=null?(c.gainLossCAD+c.manualDividendsCAD)/c.totalCostCAD*100:null;
+            return(<tr key={h.id}><td><span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>#{i+1}</span></td><td><span className="ticker">{h.ticker}</span>{c.isConverted&&<span className="fx-badge">USD</span>}</td><td><span className="badge" style={{background:c.isConverted?"var(--amber-dim)":"var(--green-dim)",color:c.isConverted?"var(--amber)":"var(--green)",fontSize:9}}>{c.currency}</span></td><td><span className="badge" style={{background:at?.color+"22",color:at?.color}}>{at?.owner}</span></td><td className="mono text-right">{fmtDollar(c.totalCostCAD)}</td><td className="mono text-right">{fmtDollar(c.marketValueCAD??c.totalCostCAD)}</td><td className={`mono text-right ${c.gainLossCAD==null?"":c.gainLossCAD>=0?"pos":"neg"}`}>{c.gainLossCAD!=null?fmtDollar(c.gainLossCAD,true):"—"}</td><td className={`mono text-right ${c.gainLossPct==null?"":c.gainLossPct>=0?"pos":"neg"}`}>{c.gainLossPct!=null?fmtPct(c.gainLossPct,true):"—"}</td><td className="mono text-right" style={{color:"var(--purple)"}}>{c.estimatedAnnualDivCAD!=null?fmtDollar(c.estimatedAnnualDivCAD):"—"}</td><td className={`mono text-right ${totalReturn==null?"":totalReturn>=0?"pos":"neg"}`}>{totalReturn!=null?fmtPct(totalReturn,true):"—"}</td></tr>);
           })}</tbody>
         </table></div>
       </div>
@@ -816,6 +841,7 @@ export default function App() {
   const [state,setState]=useState({holdings:[],accounts:{},soldPositions:[]});
   const [prices,setPrices]=useState({});
   const [divInfo,setDivInfo]=useState({});
+  const [usdcad,setUsdcad]=useState(1.36);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
   const [refreshing,setRefreshing]=useState(false);
@@ -828,8 +854,11 @@ export default function App() {
   useEffect(()=>{
     async function load(){
       try{
-        const [accounts,holdings,soldPositions]=await Promise.all([fetchAccounts(),fetchHoldings(),fetchSoldPositions()]);
+        const [accounts,holdings,soldPositions,rate]=await Promise.all([
+          fetchAccounts(),fetchHoldings(),fetchSoldPositions(),fetchUSDCAD()
+        ]);
         setState({accounts,holdings,soldPositions});
+        setUsdcad(rate);
         setLoading(false);
         const priceResults=await Promise.all(holdings.map(h=>fetchPrice(h.ticker,h.exchange)));
         const pm={};
@@ -848,10 +877,14 @@ export default function App() {
 
   const refreshPrices=useCallback(async()=>{
     setRefreshing(true);
-    const priceResults=await Promise.all(state.holdings.map(h=>fetchPrice(h.ticker,h.exchange)));
+    const [priceResults,rate]=await Promise.all([
+      Promise.all(state.holdings.map(h=>fetchPrice(h.ticker,h.exchange))),
+      fetchUSDCAD()
+    ]);
     const pm={...prices};
     priceResults.forEach(d=>{ if(d)pm[d.symbol]=d.price; });
     setPrices(pm);
+    setUsdcad(rate);
     setRefreshing(false);
   },[state.holdings,prices]);
 
@@ -899,8 +932,8 @@ export default function App() {
   };
 
   const handleSell=async(holding,{sellPrice,sellDate,proceeds,gainLoss,gainLossPct})=>{
-    const c=calcHolding(holding,prices,divInfo);
-    const pos={id:uid(),accountId:holding.accountId,ticker:holding.ticker,name:holding.name,exchange:holding.exchange,shares:c.totalShares,avgCost:c.avgCost,sellPrice,sellDate,totalCost:c.totalCost,proceeds,gainLoss,gainLossPct,dividendsReceived:c.manualDividends};
+    const c=calcHolding(holding,prices,divInfo,usdcad);
+    const pos={id:uid(),accountId:holding.accountId,ticker:holding.ticker,name:holding.name,exchange:holding.exchange,shares:c.totalShares,avgCost:c.avgCostCAD,sellPrice,sellDate,totalCost:c.totalCostCAD,proceeds,gainLoss,gainLossPct,dividendsReceived:c.manualDividendsCAD};
     try{ await addSoldPosition(pos); await removeHolding(holding.id); setState(s=>({...s,holdings:s.holdings.filter(h=>h.id!==holding.id),soldPositions:[pos,...s.soldPositions]})); }
     catch(e){alert("Error: "+e.message);}
   };
@@ -919,7 +952,7 @@ export default function App() {
   const ACCOUNT_IDS=["rrsp_k","tfsa_k","nonreg_k","rrsp_dj","tfsa_dj","nonreg_dj","joint_k"];
 
   if(loading)return(<><GlobalStyle/><div className="loading-screen"><div className="spinner" style={{width:32,height:32}}/><p>Loading your portfolio…</p></div></>);
-  if(error)return(<><GlobalStyle/><div className="loading-screen"><div className="alert-error">⚠ {error}</div><p style={{marginTop:12,fontSize:12,color:"var(--text-2)"}}>Check Supabase configuration.</p></div></>);
+  if(error)return(<><GlobalStyle/><div className="loading-screen"><div className="alert-error">⚠ {error}</div><p style={{marginTop:12,fontSize:12,color:"var(--text-2)"}}>Check configuration.</p></div></>);
 
   return (
     <><GlobalStyle/>
@@ -950,7 +983,14 @@ export default function App() {
           <div className="sidebar-owner-label">Insights</div>
           <div className={`sidebar-item ${activeView==="analytics"?"active":""}`} onClick={()=>setActiveView("analytics")}><span className="icon">📊</span>Analytics</div>
         </div>
-        <div className="sidebar-footer"><p>Prices via Finnhub</p><p>News via GNews</p><p>Data via Supabase</p><p>{time.toLocaleTimeString("en-CA",{hour:"2-digit",minute:"2-digit"})}</p></div>
+        <div className="sidebar-footer">
+          <p>Prices via Finnhub</p>
+          <p>FX via ExchangeRate-API</p>
+          <p>News via GNews</p>
+          <p>Data via Supabase</p>
+          <p style={{marginTop:4,color:"var(--amber)"}}>{fmt(usdcad,4)} USD/CAD</p>
+          <p>{time.toLocaleTimeString("en-CA",{hour:"2-digit",minute:"2-digit"})}</p>
+        </div>
       </div>
       <div className="main">
         <div className="topbar">
@@ -960,24 +1000,25 @@ export default function App() {
           </div>
           <div className="topbar-right">
             {refreshing&&<div className="spinner"/>}
+            <span style={{fontSize:11,color:"var(--amber)",fontFamily:"var(--mono)",background:"var(--amber-dim)",padding:"3px 8px",borderRadius:4}}>1 USD = {fmt(usdcad,4)} CAD</span>
             <span style={{fontSize:11,color:"var(--text-2)",fontFamily:"var(--mono)"}}>{time.toLocaleDateString("en-CA",{weekday:"short",month:"short",day:"numeric"})}</span>
             <button className="btn btn-ghost btn-sm" onClick={refreshPrices} disabled={refreshing}>⟳ Prices</button>
             <button className="btn btn-primary btn-sm" onClick={()=>setModal({type:"addHolding",data:{accountId:ACCOUNT_IDS.includes(activeView)?activeView:"rrsp_k"}})}>+ Add Security</button>
           </div>
         </div>
         <div className="content">
-          {activeView==="dashboard"&&<DashboardView state={state} prices={prices} divInfo={divInfo} onRefresh={refreshPrices} refreshing={refreshing}/>}
-          {ACCOUNT_IDS.includes(activeView)&&<AccountView accountId={activeView} state={state} prices={prices} divInfo={divInfo} onAddHolding={()=>setModal({type:"addHolding",data:{accountId:activeView}})} onEdit={h=>setModal({type:"editHolding",data:h})} onSell={h=>setModal({type:"sell",data:h})} onNews={h=>setModal({type:"news",data:h})} onDividendInfo={h=>setModal({type:"dividendInfo",data:h})} onEditCash={()=>setModal({type:"cash",data:{accountId:activeView}})} onDeleteSold={handleDeleteSold}/>}
-          {activeView==="analytics"&&<AnalyticsView state={state} prices={prices} divInfo={divInfo}/>}
+          {activeView==="dashboard"&&<DashboardView state={state} prices={prices} divInfo={divInfo} usdcad={usdcad} onRefresh={refreshPrices} refreshing={refreshing}/>}
+          {ACCOUNT_IDS.includes(activeView)&&<AccountView accountId={activeView} state={state} prices={prices} divInfo={divInfo} usdcad={usdcad} onAddHolding={()=>setModal({type:"addHolding",data:{accountId:activeView}})} onEdit={h=>setModal({type:"editHolding",data:h})} onSell={h=>setModal({type:"sell",data:h})} onNews={h=>setModal({type:"news",data:h})} onDividendInfo={h=>setModal({type:"dividendInfo",data:h})} onEditCash={()=>setModal({type:"cash",data:{accountId:activeView}})} onDeleteSold={handleDeleteSold}/>}
+          {activeView==="analytics"&&<AnalyticsView state={state} prices={prices} divInfo={divInfo} usdcad={usdcad}/>}
         </div>
       </div>
     </div>
     {modal?.type==="addHolding"&&<HoldingModal defaultAccountId={modal.data.accountId} onClose={()=>setModal(null)} onSave={handleSaveHolding}/>}
     {modal?.type==="editHolding"&&<HoldingModal existing={modal.data} onClose={()=>setModal(null)} onSave={handleSaveHolding}/>}
-    {modal?.type==="sell"&&<SellModal holding={modal.data} prices={prices} onClose={()=>setModal(null)} onSell={(data)=>handleSell(modal.data,data)}/>}
+    {modal?.type==="sell"&&<SellModal holding={modal.data} prices={prices} usdcad={usdcad} onClose={()=>setModal(null)} onSell={(data)=>handleSell(modal.data,data)}/>}
     {modal?.type==="cash"&&<CashModal account={state.accounts[modal.data.accountId]||{id:modal.data.accountId,cash:0,deposits:0,withdrawals:0}} onClose={()=>setModal(null)} onSave={d=>handleUpdateCash(modal.data.accountId,d)}/>}
     {modal?.type==="news"&&<NewsPanel holding={modal.data} onClose={()=>setModal(null)}/>}
-    {modal?.type==="dividendInfo"&&<DividendInfoModal holding={modal.data} divInfo={divInfo} onClose={()=>setModal(null)}/>}
+    {modal?.type==="dividendInfo"&&<DividendInfoModal holding={modal.data} divInfo={divInfo} usdcad={usdcad} onClose={()=>setModal(null)}/>}
     </>
   );
 }
